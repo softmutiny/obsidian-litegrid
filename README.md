@@ -32,7 +32,7 @@
 1. 下载最新 Release 中的 `main.js`、`manifest.json` 和 `styles.css`。
 2. 在资料库中创建 `.obsidian/plugins/litegrid/`。
 3. 将三个文件放入该目录。
-4. 重新加载 Obsidian，并在 **设置 → 第三方插件** 中启用 **轻格 LiteGrid**。
+4. 重新加载 Obsidian，并在 **设置 → 第三方插件** 中启用 **LiteGrid（轻格）**。
 
 ## 开发
 
@@ -78,7 +78,7 @@ LiteGrid is a calm, native-feeling CSV and HTML editor for people who want struc
 
 After LiteGrid is accepted into the Obsidian community directory, install it from **Settings → Community plugins → Browse** by searching for `LiteGrid`.
 
-For a manual installation, place `main.js`, `manifest.json`, and `styles.css` from the latest release in `.obsidian/plugins/litegrid/`, reload Obsidian, and enable **轻格 LiteGrid**.
+For a manual installation, place `main.js`, `manifest.json`, and `styles.css` from the latest release in `.obsidian/plugins/litegrid/`, reload Obsidian, and enable **LiteGrid**.
 
 ### Privacy
 
