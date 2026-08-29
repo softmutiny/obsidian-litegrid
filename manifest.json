@@ -1,0 +1,10 @@
+{
+	"id": "litegrid",
+	"name": "轻格 LiteGrid",
+	"version": "0.3.0",
+	"minAppVersion": "1.5.0",
+	"description": "轻负担、高审美的 CSV 与 HTML 编辑器。A calm, native-feeling CSV and HTML editor for Obsidian.",
+	"author": "Avenil 与纤凝",
+	"authorUrl": "https://github.com/softmutiny",
+	"isDesktopOnly": true
+}
