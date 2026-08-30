@@ -3,6 +3,7 @@ export interface CsvDocument {
 	delimiter: string;
 	eol: string;
 	bom: boolean;
+	trailingEol: boolean;
 }
 
 function countDelimiter(line: string, delimiter: string): number {
@@ -33,6 +34,7 @@ export function parseCsv(source: string): CsvDocument {
 	const text = bom ? source.slice(1) : source;
 	const delimiter = detectDelimiter(text);
 	const eol = text.includes('\r\n') ? '\r\n' : '\n';
+	const trailingEol = /[\r\n]$/.test(text);
 	const rows: string[][] = [];
 	let row: string[] = [];
 	let cell = '';
@@ -44,8 +46,12 @@ export function parseCsv(source: string): CsvDocument {
 			if (quoted && text[index + 1] === '"') {
 				cell += '"';
 				index += 1;
+			} else if (quoted) {
+				quoted = false;
+			} else if (cell.length === 0) {
+				quoted = true;
 			} else {
-				quoted = !quoted;
+				cell += char;
 			}
 		} else if (!quoted && char === delimiter) {
 			row.push(cell);
@@ -61,15 +67,15 @@ export function parseCsv(source: string): CsvDocument {
 		}
 	}
 
-	if (cell.length > 0 || row.length > 0 || (text.length > 0 && !/[\r\n]$/.test(text))) {
+	if (cell.length > 0 || row.length > 0 || (text.length > 0 && !trailingEol)) {
 		row.push(cell);
 		rows.push(row);
 	}
-	return { rows, delimiter, eol, bom };
+	return { rows, delimiter, eol, bom, trailingEol };
 }
 
 function quoteCell(value: string, delimiter: string): string {
-	if (!value.includes(delimiter) && !/["\r\n]/.test(value)) return value;
+	if (!value.includes(delimiter) && !/[\r\n]/.test(value) && !value.startsWith('"')) return value;
 	return `"${value.replaceAll('"', '""')}"`;
 }
 
@@ -77,7 +83,8 @@ export function serializeCsv(document: CsvDocument): string {
 	const body = document.rows
 		.map((row) => row.map((cell) => quoteCell(cell, document.delimiter)).join(document.delimiter))
 		.join(document.eol);
-	return `${document.bom ? '\uFEFF' : ''}${body}`;
+	const trailing = document.trailingEol && document.rows.length > 0 ? document.eol : '';
+	return `${document.bom ? '\uFEFF' : ''}${body}${trailing}`;
 }
 
 export function normalizeRows(rows: string[][], width: number): string[][] {
