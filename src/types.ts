@@ -33,9 +33,14 @@ export interface FieldSchema {
 	currencyCode?: CurrencyCode;
 	currencyDecimals?: number;
 	currencyUseThousands?: boolean;
+	numberFormat?: NumberFormat;
+	numberUseThousands?: boolean;
+	dateFormat?: DateFormat;
 }
 
 export type CurrencyCode = 'CNY' | 'USD' | 'EUR' | 'GBP' | 'JPY';
+export type NumberFormat = 'raw' | 'integer' | 'd1' | 'd2' | 'd3' | 'd4' | 'percent' | 'percent2';
+export type DateFormat = 'iso' | 'cn' | 'slash' | 'md-cn' | 'cn-week' | 'cn-time' | 'iso-time' | 'us' | 'eu';
 
 export type RuleOperator = 'eq' | 'neq' | 'contains' | 'not-contains' | 'empty' | 'not-empty' | 'all';
 
@@ -85,7 +90,7 @@ export interface TableMetaHost {
 export const FIELD_TYPES: Array<{ value: FieldType; label: string; icon: string }> = [
 	{ value: 'text', label: '文本', icon: 'square-a' },
 	{ value: 'number', label: '数字', icon: '123' },
-	{ value: 'currency', label: '货币', icon: 'circle-yen' },
+	{ value: 'currency', label: '货币', icon: 'circle-dollar-sign' },
 	{ value: 'single', label: '单选', icon: 'circle-chevron-down' },
 	{ value: 'multi', label: '多选', icon: 'list-checks' },
 	{ value: 'date', label: '日期', icon: 'calendar-days' },

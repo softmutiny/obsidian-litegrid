@@ -1,8 +1,8 @@
 import { Modal, normalizePath, Notice, setIcon, TextFileView, TFile, WorkspaceLeaf } from 'obsidian';
 import { normalizeRows, parseCsv, serializeCsv, type CsvDocument } from '../utils/csv';
 import {
-	FIELD_TYPES, OPTION_COLORS, type ColumnStatistic, type CurrencyCode, type FieldSchema, type FieldType, type FillRule,
-	type FilterRule, type RowHeight, type RuleOperator, type TableMeta,
+	FIELD_TYPES, OPTION_COLORS, type ColumnStatistic, type CurrencyCode, type DateFormat, type FieldSchema, type FieldType, type FillRule,
+	type FilterRule, type NumberFormat, type RowHeight, type RuleOperator, type TableMeta,
 	type TableMetaHost, uid,
 } from '../types';
 
@@ -25,13 +25,34 @@ const CURRENCY_OPTIONS: Array<{ code: CurrencyCode; symbol: string; label: strin
 	{ code: 'GBP', symbol: '£', label: '英镑' },
 	{ code: 'JPY', symbol: '¥', label: '日元' },
 ];
+const NUMBER_FORMAT_OPTIONS: Array<{ value: NumberFormat; label: string }> = [
+	{ value: 'integer', label: '整数' },
+	{ value: 'd1', label: '1 位（1.0）' },
+	{ value: 'd2', label: '2 位（1.00）' },
+	{ value: 'd3', label: '3 位（1.000）' },
+	{ value: 'd4', label: '4 位（1.0000）' },
+	{ value: 'percent', label: '百分比（100%）' },
+	{ value: 'percent2', label: '百分比 2 位（100.00%）' },
+	{ value: 'raw', label: '显示原值' },
+];
+const DATE_FORMAT_OPTIONS: Array<{ value: DateFormat; label: string }> = [
+	{ value: 'cn', label: '2018年4月20日' },
+	{ value: 'iso', label: '2018-04-20' },
+	{ value: 'slash', label: '2018/4/20' },
+	{ value: 'md-cn', label: '4月20日' },
+	{ value: 'cn-week', label: '2018年4月20日 星期五' },
+	{ value: 'cn-time', label: '2018年4月20日 14:00' },
+	{ value: 'iso-time', label: '2018-04-20 14:00' },
+	{ value: 'us', label: '4/20/2018' },
+	{ value: 'eu', label: '20/4/2018' },
+];
 const OPERATOR_LABEL: Record<RuleOperator, string> = {
 	eq: '等于', neq: '不等于', contains: '包含', 'not-contains': '不包含',
 	empty: '为空', 'not-empty': '不为空', all: '所有内容',
 };
 
 export class LiteGridCsvView extends TextFileView {
-	private document: CsvDocument = { rows: [], delimiter: ',', eol: '\n', bom: false };
+	private document: CsvDocument = { rows: [], delimiter: ',', eol: '\n', bom: false, trailingEol: false };
 	private headers = [...DEFAULT_HEADERS];
 	private rows: string[][] = [];
 	private meta: TableMeta = this.defaultMeta(DEFAULT_HEADERS);
@@ -41,6 +62,10 @@ export class LiteGridCsvView extends TextFileView {
 	private panel: PanelKind = null;
 	private selection: Selection | null = null;
 	private dragging = false;
+	private dragRowIndex: number | null = null;
+	private dragGhost: HTMLElement | null = null;
+	private dragBlank: HTMLElement | null = null;
+	private dragFollow: ((event: DragEvent) => void) | null = null;
 	private collapsedGroups = new Set<string>();
 	private contextMenu: HTMLElement | null = null;
 	private history: string[] = [];
@@ -73,11 +98,18 @@ export class LiteGridCsvView extends TextFileView {
 		this.data = data;
 		this.document = parseCsv(data);
 		const [header, ...body] = this.document.rows;
-		let restoredDefaultTitle = false;
-		if (header?.some((cell) => cell.length > 0)) {
-			this.headers = header;
-			if (this.headers[0] === '文本' && this.headers[1] === '数字' && this.headers[2] === '单选') { this.headers[0] = '标题'; restoredDefaultTitle = true; }
-			this.rows = normalizeRows(body, header.length);
+		const hasHeaderText = header?.some((cell) => cell.length > 0) ?? false;
+		if (hasHeaderText) {
+			this.headers = [...header!];
+			if (this.headers[0] === '文本' && this.headers[1] === '数字' && this.headers[2] === '单选') this.headers[0] = '标题';
+			const width = body.reduce((max, row) => Math.max(max, row.length), this.headers.length);
+			this.headers = normalizeRows([this.headers], width)[0] ?? this.headers;
+			this.rows = normalizeRows(body, width);
+		} else if (this.document.rows.length > 0) {
+			// 首行全空但下面有数据：合成占位表头并保留全部行，避免整份数据被丢弃
+			const width = this.document.rows.reduce((max, row) => Math.max(max, row.length), DEFAULT_HEADERS.length);
+			this.headers = Array.from({ length: width }, (_, i) => DEFAULT_HEADERS[i] ?? `字段 ${i + 1}`);
+			this.rows = normalizeRows(this.document.rows, width);
 		} else {
 			this.headers = [...DEFAULT_HEADERS];
 			this.rows = [];
@@ -88,7 +120,6 @@ export class LiteGridCsvView extends TextFileView {
 		const restoredDefaultType = defaultSignature && this.meta.fields[0]?.type === 'text';
 		if (restoredDefaultType && this.meta.fields[0]) this.meta.fields[0].type = 'attachment';
 		this.render();
-		if (restoredDefaultTitle) { this.data = this.getViewData(); window.setTimeout(() => void this.save(), 0); }
 		if (restoredDefaultType) this.scheduleMetaSave();
 	}
 
@@ -97,6 +128,7 @@ export class LiteGridCsvView extends TextFileView {
 		if (this.saveTimer !== null) window.clearTimeout(this.saveTimer);
 		if (this.metaTimer !== null) window.clearTimeout(this.metaTimer);
 		this.saveTimer = null; this.metaTimer = null; this.closeContextMenu(); this.contentEl.empty(); this.rows = [];
+		this.history = []; this.historyIndex = -1; this.selection = null; this.collapsedGroups.clear();
 	}
 
 	private defaultMeta(headers: string[]): TableMeta {
@@ -200,7 +232,7 @@ export class LiteGridCsvView extends TextFileView {
 		const right = toolbar.createDiv('wb-toolbar-right');
 		this.undoButton = this.addIconButton(right, 'undo-2', '撤销', () => this.undo());
 		this.redoButton = this.addIconButton(right, 'redo-2', '重做', () => this.redo());
-		this.undoButton.disabled = this.historyIndex <= 0;
+		this.undoButton.disabled = this.history.length === 0 || (this.historyIndex <= 0 && this.history[this.historyIndex] === this.getViewData());
 		this.redoButton.disabled = this.historyIndex >= this.history.length - 1;
 		const searchToggle = this.addIconButton(right, 'search', '搜索', () => {
 			this.searchVisible = !this.searchVisible;
@@ -296,13 +328,17 @@ export class LiteGridCsvView extends TextFileView {
 		this.data = snapshot;
 		this.document = parseCsv(snapshot);
 		const [header, ...body] = this.document.rows;
-		if (header?.some((cell) => cell.length > 0)) { this.headers = header; this.rows = normalizeRows(body, header.length); }
+		if (header?.some((cell) => cell.length > 0)) {
+			const width = body.reduce((max, row) => Math.max(max, row.length), header.length);
+			this.headers = normalizeRows([header], width)[0] ?? header;
+			this.rows = normalizeRows(body, width);
+		}
 		else { this.headers = [...DEFAULT_HEADERS]; this.rows = []; }
 		this.meta = this.reconcileMeta(this.meta, this.headers);
 		this.render();
 	}
 
-	private undo() { if (this.historyIndex > 0) { this.historyIndex -= 1; this.applySnapshot(this.history[this.historyIndex]!); this.selection = null; void this.save(); } }
+	private undo() { this.pushHistory(); if (this.historyIndex > 0) { this.historyIndex -= 1; this.applySnapshot(this.history[this.historyIndex]!); this.selection = null; void this.save(); } }
 	private redo() { if (this.historyIndex < this.history.length - 1) { this.historyIndex += 1; this.applySnapshot(this.history[this.historyIndex]!); this.selection = null; void this.save(); } }
 	private addToolbarButton(container: HTMLElement, label: string, iconName: string, onClick: () => void, active: boolean, count = 0) {
 		const button = container.createEl('button', { cls: `wb-toolbar-button${active || count ? ' is-active' : ''}` }); button.dataset.action = label;
@@ -331,6 +367,33 @@ export class LiteGridCsvView extends TextFileView {
 			const preferred = align === 'right' ? anchorRect.right - toolbarRect.left - width : anchorRect.left - toolbarRect.left;
 			popover.setCssProps({ left: `${Math.max(0, Math.min(preferred, toolbar.clientWidth - width))}px`, right: 'auto' });
 		});
+	}
+
+	private createStyledSelect(container: HTMLElement, options: Array<{ value: string; label: string }>, current: string, onChange: (value: string) => void) {
+		const wrap = container.createDiv('wb-mini-select');
+		const button = wrap.createEl('button', { cls: 'wb-mini-select-button', attr: { type: 'button', 'aria-haspopup': 'listbox' } });
+		const label = button.createSpan({ cls: 'wb-mini-select-label', text: options.find((option) => option.value === current)?.label ?? current });
+		setIcon(button.createSpan('wb-mini-select-chevron'), 'chevron-down');
+		const menu = wrap.createDiv('wb-mini-select-menu'); menu.hidden = true;
+		let selected = current;
+		const build = () => {
+			menu.empty();
+			options.forEach((option) => {
+				const item = menu.createEl('button', { cls: `wb-mini-select-option${option.value === selected ? ' is-selected' : ''}`, attr: { type: 'button' } });
+				item.createSpan({ cls: 'wb-mini-select-option-label', text: option.label });
+				const check = item.createSpan('wb-mini-select-check'); if (option.value === selected) setIcon(check, 'check');
+				item.onclick = (event) => { event.stopPropagation(); selected = option.value; label.setText(option.label); menu.hidden = true; build(); onChange(option.value); };
+			});
+		};
+		build();
+		const dismiss = (event: MouseEvent) => { if (!wrap.contains(event.target as Node)) { menu.hidden = true; this.containerEl.ownerDocument.removeEventListener('mousedown', dismiss); } };
+		button.onclick = (event) => {
+			event.stopPropagation();
+			const opening = menu.hidden; menu.hidden = !opening;
+			if (opening) window.setTimeout(() => this.containerEl.ownerDocument.addEventListener('mousedown', dismiss), 0);
+			else this.containerEl.ownerDocument.removeEventListener('mousedown', dismiss);
+		};
+		return wrap;
 	}
 
 	private renderFieldTypeIcon(container: HTMLElement, type: FieldType, className = 'wb-field-type-box') {
@@ -371,23 +434,29 @@ export class LiteGridCsvView extends TextFileView {
 				optionArea.createEl('label', { text: '格式设置' });
 				const settings = optionArea.createDiv('wb-currency-settings');
 				const symbolRow = settings.createDiv('wb-currency-setting-row'); symbolRow.createSpan({ text: '货币符号' });
-				const symbol = symbolRow.createEl('select');
-				CURRENCY_OPTIONS.forEach((currency) => symbol.createEl('option', { value: currency.code, text: `${currency.symbol} ${currency.code} ${currency.label}` }));
-				symbol.value = draft.currencyCode; symbol.onchange = () => { draft.currencyCode = symbol.value as CurrencyCode; };
+				this.createStyledSelect(symbolRow, CURRENCY_OPTIONS.map((currency) => ({ value: currency.code, label: `${currency.symbol} ${currency.code} ${currency.label}` })), draft.currencyCode, (value) => { draft.currencyCode = value as CurrencyCode; });
 				const decimalRow = settings.createDiv('wb-currency-setting-row'); decimalRow.createSpan({ text: '小数位数' });
-				const decimals = decimalRow.createEl('select');
-				[0, 1, 2, 3, 4].forEach((places) => {
-					const example = places === 0 ? '1' : `1.${'0'.repeat(places)}`;
-					decimals.createEl('option', { value: String(places), text: `${places} 位（${example}）` });
-				});
-				decimals.value = String(draft.currencyDecimals); decimals.onchange = () => { draft.currencyDecimals = Number(decimals.value); };
+				this.createStyledSelect(decimalRow, [0, 1, 2, 3, 4].map((places) => ({ value: String(places), label: `${places} 位（${places === 0 ? '1' : `1.${'0'.repeat(places)}`}）` })), String(draft.currencyDecimals ?? 2), (value) => { draft.currencyDecimals = Number(value); });
 				const thousandRow = settings.createDiv('wb-currency-setting-row'); thousandRow.createSpan({ text: '使用千位符' });
 				const thousand = thousandRow.createEl('button', { cls: `wb-switch${draft.currencyUseThousands ? ' is-on' : ''}`, attr: { type: 'button', 'aria-pressed': String(draft.currencyUseThousands) } });
 				thousand.onclick = () => { draft.currencyUseThousands = !draft.currencyUseThousands; thousand.toggleClass('is-on', draft.currencyUseThousands); thousand.setAttribute('aria-pressed', String(draft.currencyUseThousands)); };
 			}
 			if (draft.type === 'number') {
-				optionArea.createEl('label', { text: '格式设置' }); const format = optionArea.createEl('select'); format.createEl('option', { text: '整数' });
-				const thousand = optionArea.createEl('label', { cls: 'wb-check-row' }); thousand.createEl('input', { attr: { type: 'checkbox' } }); thousand.createSpan({ text: '使用千位符' });
+				draft.numberFormat ??= 'raw'; draft.numberUseThousands ??= false;
+				optionArea.createEl('label', { text: '格式设置' });
+				const settings = optionArea.createDiv('wb-currency-settings');
+				const formatRow = settings.createDiv('wb-currency-setting-row'); formatRow.createSpan({ text: '数字格式' });
+				this.createStyledSelect(formatRow, NUMBER_FORMAT_OPTIONS, draft.numberFormat, (value) => { draft.numberFormat = value as NumberFormat; });
+				const thousandRow = settings.createDiv('wb-currency-setting-row'); thousandRow.createSpan({ text: '使用千位符' });
+				const thousand = thousandRow.createEl('button', { cls: `wb-switch${draft.numberUseThousands ? ' is-on' : ''}`, attr: { type: 'button', 'aria-pressed': String(draft.numberUseThousands) } });
+				thousand.onclick = () => { draft.numberUseThousands = !draft.numberUseThousands; thousand.toggleClass('is-on', draft.numberUseThousands ?? false); thousand.setAttribute('aria-pressed', String(draft.numberUseThousands)); };
+			}
+			if (draft.type === 'date') {
+				draft.dateFormat ??= 'iso';
+				optionArea.createEl('label', { text: '格式设置' });
+				const settings = optionArea.createDiv('wb-currency-settings');
+				const formatRow = settings.createDiv('wb-currency-setting-row'); formatRow.createSpan({ text: '日期格式' });
+				this.createStyledSelect(formatRow, DATE_FORMAT_OPTIONS, draft.dateFormat, (value) => { draft.dateFormat = value as DateFormat; });
 			}
 			if (draft.type === 'single' || draft.type === 'multi') {
 				optionArea.createEl('label', { text: '选项管理' });
@@ -467,9 +536,15 @@ export class LiteGridCsvView extends TextFileView {
 	}
 
 	private renderGrid(page: HTMLElement) {
-		const shell = page.createDiv('wb-grid-shell'); const table = shell.createEl('table', { cls: 'wb-grid' }); this.renderHeader(table); const body = table.createEl('tbody'); const visible = this.getVisibleRows();
+		const shell = page.createDiv('wb-grid-shell'); const table = shell.createEl('table', { cls: 'wb-grid' }); this.renderColgroup(table); this.renderHeader(table); const body = table.createEl('tbody'); const visible = this.getVisibleRows();
 		if (this.meta.groups.length) this.renderGroupedRows(body, visible); else this.renderPlainRows(body, visible);
 		this.renderAddRow(body);
+	}
+	private renderColgroup(table: HTMLTableElement) {
+		const colgroup = table.createEl('colgroup');
+		colgroup.createEl('col', { cls: 'wb-col-rownumber' });
+		this.meta.fields.forEach((field, columnIndex) => { if (!field.visible) return; const col = colgroup.createEl('col'); col.dataset.column = String(columnIndex); col.style.width = `${field.width}px`; });
+		colgroup.createEl('col', { cls: 'wb-col-addfield' });
 	}
 	private renderGridOnly() { const page = this.contentEl.querySelector<HTMLElement>('.wb-page'); if (!page) return; page.querySelector('.wb-grid-shell')?.remove(); this.renderGrid(page); }
 
@@ -479,7 +554,7 @@ export class LiteGridCsvView extends TextFileView {
 		selectAll.onclick = () => { this.selection = allSelected ? null : { startRow: 0, endRow: this.displayedRowEnd(), startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.renderGridOnly(); };
 		let frozenLeft = 40;
 		this.meta.fields.forEach((field, columnIndex) => {
-			if (!field.visible) return; const th = head.createEl('th'); th.style.width = `${field.width}px`; th.dataset.column = String(columnIndex);
+			if (!field.visible) return; const th = head.createEl('th'); th.dataset.column = String(columnIndex);
 			if (field.frozen) { th.addClass('is-frozen-column'); th.style.left = `${frozenLeft}px`; frozenLeft += field.width; }
 			const button = th.createEl('button', { cls: 'wb-column-header' }); button.dataset.column = String(columnIndex); this.renderFieldTypeIcon(button, field.type); button.createSpan({ cls: 'wb-column-title', text: field.name }); const chevron = button.createSpan('wb-column-chevron'); setIcon(chevron, 'chevron-down');
 			button.onclick = (event) => { if ((event.target as HTMLElement).closest('.wb-column-chevron')) this.openHeaderContextMenu(button, columnIndex); else this.openFieldEditor(button, columnIndex); };
@@ -488,7 +563,7 @@ export class LiteGridCsvView extends TextFileView {
 		});
 		const addField = head.createEl('th', { cls: 'wb-add-field-head' }); const addButton = addField.createEl('button'); setIcon(addButton.createSpan(), 'plus'); addButton.createSpan({ text: '字段' }); addButton.onclick = () => this.insertColumn(this.headers.length);
 	}
-	private renderPlainRows(body: HTMLTableSectionElement, visible: VisibleRow[]) { const displayCount = Math.max(visible.length, 7); for (let index = 0; index < displayCount; index += 1) this.renderRow(body, visible[index] ?? { row: this.createEmptyRow(), index }); }
+	private renderPlainRows(body: HTMLTableSectionElement, visible: VisibleRow[]) { const displayCount = Math.max(visible.length, 7); for (let index = 0; index < displayCount; index += 1) this.renderRow(body, visible[index] ?? { row: this.createEmptyRow(), index: this.rows.length + (index - visible.length) }); }
 	private renderGroupedRows(body: HTMLTableSectionElement, visible: VisibleRow[]) {
 		const column = this.meta.groups[0]?.column ?? 0; const groups = new Map<string, VisibleRow[]>();
 		visible.forEach((item) => { const key = item.row[column]?.trim() || '(空)'; const bucket = groups.get(key) ?? []; bucket.push(item); groups.set(key, bucket); });
@@ -525,7 +600,7 @@ export class LiteGridCsvView extends TextFileView {
 			this.pushHistory(); const next = this.createEmptyRow(); if (groupKey !== '(空)') next[groupColumn] = groupKey;
 			this.rows.push(next); this.scheduleSave(); this.render(); this.focusCell(this.rows.length - 1, 0);
 		};
-		this.meta.fields.forEach((field) => { if (field.visible) { const cell = row.createEl('td'); cell.style.width = `${field.width}px`; } });
+		this.meta.fields.forEach((field) => { if (field.visible) row.createEl('td'); });
 		row.createEl('td', { cls: 'wb-add-field-spacer' });
 	}
 
@@ -533,9 +608,44 @@ export class LiteGridCsvView extends TextFileView {
 		const tr = body.createEl('tr'); tr.dataset.row = String(item.index); if (this.selection?.startRow === item.index) tr.addClass('is-active-row'); const rowHead = tr.createEl('th', { cls: 'wb-row-number', text: String(item.index + 1) }); rowHead.dataset.row = String(item.index); this.applyRowHeadSelectionClasses(rowHead, item.index);
 		rowHead.onclick = () => { this.selection = { startRow: item.index, endRow: item.index, startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.renderGridOnly(); };
 		rowHead.oncontextmenu = (event) => { event.preventDefault(); this.selection = { startRow: item.index, endRow: item.index, startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.openContextMenu(event.clientX, event.clientY, this.rowMenuItems(item.index)); };
+		if (item.index < this.rows.length) {
+			rowHead.draggable = true; rowHead.setAttribute('title', '拖拽调整行顺序');
+			rowHead.ondragstart = (event) => {
+				this.dragRowIndex = item.index; tr.addClass('is-dragging-row');
+				const doc = this.containerEl.ownerDocument;
+				const ghost = doc.body.createDiv('wb-row-drag-ghost');
+				ghost.createDiv({ cls: 'wb-row-drag-ghost-num', text: String(item.index + 1) });
+				this.meta.fields.forEach((cellField, cellIndex) => {
+					if (!cellField.visible) return;
+					const segment = ghost.createDiv('wb-row-drag-ghost-cell'); segment.style.width = `${cellField.width}px`;
+					segment.setText(this.cellDisplayText(cellField, this.rows[item.index]?.[cellIndex] ?? ''));
+				});
+				ghost.createSpan({ cls: 'wb-row-drag-ghost-badge', text: `共 ${this.visibleColumnCount()} 列` });
+				const grabRect = tr.getBoundingClientRect();
+				const offsetX = event.clientX - grabRect.left; const offsetY = event.clientY - grabRect.top;
+				const place = (x: number, y: number) => { ghost.style.left = `${x - offsetX}px`; ghost.style.top = `${y - offsetY}px`; };
+				place(event.clientX, event.clientY);
+				this.dragGhost = ghost;
+				const follow = (moveEvent: DragEvent) => { if (moveEvent.clientX === 0 && moveEvent.clientY === 0) return; place(moveEvent.clientX, moveEvent.clientY); };
+				this.dragFollow = follow; doc.addEventListener('dragover', follow);
+				if (event.dataTransfer) {
+					event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', String(item.index));
+					const blank = doc.body.createDiv('wb-drag-blank'); this.dragBlank = blank; event.dataTransfer.setDragImage(blank, 0, 0);
+				}
+			};
+			rowHead.ondragend = () => {
+				this.dragRowIndex = null;
+				this.dragGhost?.remove(); this.dragGhost = null;
+				this.dragBlank?.remove(); this.dragBlank = null;
+				if (this.dragFollow) { this.containerEl.ownerDocument.removeEventListener('dragover', this.dragFollow); this.dragFollow = null; }
+				this.contentEl.querySelectorAll('.is-dragging-row, .wb-row-drop-before').forEach((el) => el.removeClasses(['is-dragging-row', 'wb-row-drop-before']));
+			};
+		}
+		tr.ondragover = (event) => { if (this.dragRowIndex === null || this.dragRowIndex === item.index) return; event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'; this.contentEl.querySelectorAll('.wb-row-drop-before').forEach((el) => el.removeClass('wb-row-drop-before')); tr.addClass('wb-row-drop-before'); };
+		tr.ondrop = (event) => { if (this.dragRowIndex === null) return; event.preventDefault(); tr.removeClass('wb-row-drop-before'); const from = this.dragRowIndex; this.dragRowIndex = null; this.moveRow(from, item.index); };
 		let frozenLeft = 40;
 		this.meta.fields.forEach((field, columnIndex) => {
-			if (!field.visible) return; const td = tr.createEl('td'); td.style.width = `${field.width}px`; td.dataset.row = String(item.index); td.dataset.column = String(columnIndex); this.applySelectionClassesToCell(td, item.index, columnIndex);
+			if (!field.visible) return; const td = tr.createEl('td'); td.dataset.row = String(item.index); td.dataset.column = String(columnIndex); this.applySelectionClassesToCell(td, item.index, columnIndex);
 			if (field.frozen) { td.addClass('is-frozen-column'); td.style.left = `${frozenLeft}px`; frozenLeft += field.width; }
 			const fill = this.getFill(item.row, columnIndex); if (fill) (fill.wholeRow ? tr : td).style.background = fill.color;
 			const editor = this.createCellEditor(td, item, field, columnIndex);
@@ -562,13 +672,13 @@ export class LiteGridCsvView extends TextFileView {
 		if (field.type === 'attachment') return this.createIndexCell(td, item, column);
 		if (field.type === 'checkbox') return this.createCheckboxCell(td, item, column);
 		if (field.type === 'link') return this.createExternalLinkCell(td, item, column);
+		if (field.type === 'date') return this.createDateCell(td, item, field, column);
 
-		const input = td.createEl('input', { cls: `wb-cell-input wb-cell-${field.type}`, value: field.type === 'currency' ? this.formatCurrency(value, field) : value });
+		const input = td.createEl('input', { cls: `wb-cell-input wb-cell-${field.type}`, value: field.type === 'currency' ? this.formatCurrency(value, field) : field.type === 'number' ? this.formatNumber(value, field) : value });
 		input.spellcheck = false; input.dataset.row = String(item.index); input.dataset.column = String(column);
 		switch (field.type) {
-			case 'number': input.type = 'number'; input.step = 'any'; input.inputMode = 'decimal'; break;
+			case 'number': input.type = 'text'; input.inputMode = 'decimal'; break;
 			case 'currency': input.type = 'text'; input.inputMode = 'decimal'; break;
-			case 'date': input.type = 'date'; break;
 			case 'person': input.type = 'text'; break;
 			case 'email': input.type = 'email'; input.inputMode = 'email'; break;
 			case 'phone': input.type = 'tel'; input.inputMode = 'tel'; break;
@@ -576,9 +686,85 @@ export class LiteGridCsvView extends TextFileView {
 		}
 		input.oninput = () => { this.setCell(item.index, column, input.type === 'checkbox' ? (input.checked ? 'true' : '') : input.value); this.scheduleSave(); };
 		input.onkeydown = (event) => this.handleCellKey(event, item.index, column); input.onpaste = (event) => this.handlePaste(event, item.index, column);
-		input.onfocus = () => { this.pushHistory(); if (field.type === 'currency') input.value = item.row[column] ?? ''; };
-		input.onblur = () => { if (field.type === 'currency') input.value = this.formatCurrency(item.row[column] ?? '', field); this.pushHistory(); };
+		input.onfocus = () => { this.pushHistory(); if (field.type === 'currency' || field.type === 'number') input.value = item.row[column] ?? ''; };
+		input.onblur = () => { if (field.type === 'currency') input.value = this.formatCurrency(item.row[column] ?? '', field); else if (field.type === 'number') input.value = this.formatNumber(item.row[column] ?? '', field); this.pushHistory(); };
 		return input;
+	}
+
+	private createDateCell(td: HTMLElement, item: VisibleRow, field: FieldSchema, column: number): HTMLElement {
+		const value = item.row[column] ?? '';
+		const dateFormat = field.dateFormat ?? 'iso';
+		const trigger = td.createEl('button', { cls: `wb-cell-date${value.trim() ? '' : ' is-empty'}`, attr: { type: 'button' } });
+		trigger.dataset.row = String(item.index); trigger.dataset.column = String(column);
+		if (value.trim()) trigger.createSpan({ cls: 'wb-cell-date-text', text: this.formatDate(value, dateFormat) });
+		trigger.onclick = (event) => { event.stopPropagation(); this.openDatePicker(trigger, item.index, column, field); };
+		trigger.onkeydown = (event) => this.handleCellKey(event, item.index, column);
+		return trigger;
+	}
+
+	private openDatePicker(anchor: HTMLElement, row: number, column: number, field: FieldSchema) {
+		this.closeContextMenu();
+		const dateFormat = field.dateFormat ?? 'iso';
+		const hasTime = dateFormat === 'cn-time' || dateFormat === 'iso-time';
+		const stored = this.rows[row]?.[column] ?? '';
+		const parsed = this.parseDate(stored);
+		let selected: Date | null = parsed ? new Date(parsed.getFullYear(), parsed.getMonth(), parsed.getDate()) : null;
+		let hh = parsed ? parsed.getHours() : 0; let mm = parsed ? parsed.getMinutes() : 0;
+		const view = { year: (parsed ?? new Date()).getFullYear(), month: (parsed ?? new Date()).getMonth() };
+		const rootRect = this.contentEl.getBoundingClientRect(); const rect = anchor.getBoundingClientRect();
+		const pop = this.contentEl.createDiv('wb-date-popover'); this.contextMenu = pop;
+		pop.style.left = `${Math.max(8, Math.min(rect.left - rootRect.left, rootRect.width - 296))}px`;
+		pop.style.top = `${Math.max(8, rect.bottom - rootRect.top + 4)}px`;
+		const pad = (n: number) => String(n).padStart(2, '0');
+		const commit = (date: Date | null) => {
+			this.pushHistory();
+			if (!date) this.setCell(row, column, '');
+			else { const base = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`; this.setCell(row, column, hasTime ? `${base}T${pad(hh)}:${pad(mm)}` : base); }
+			this.scheduleSave(); this.closeContextMenu(); this.renderGridOnly();
+		};
+		const sameDay = (a: Date | null, y: number, m: number, d: number) => !!a && a.getFullYear() === y && a.getMonth() === m && a.getDate() === d;
+		const build = () => {
+			pop.empty();
+			const header = pop.createDiv('wb-date-header');
+			const prev = header.createEl('button', { cls: 'wb-date-nav', attr: { type: 'button', 'aria-label': '上个月' } }); setIcon(prev, 'chevron-left');
+			header.createSpan({ cls: 'wb-date-title', text: `${view.year}年${view.month + 1}月` });
+			const next = header.createEl('button', { cls: 'wb-date-nav', attr: { type: 'button', 'aria-label': '下个月' } }); setIcon(next, 'chevron-right');
+			prev.onclick = (event) => { event.stopPropagation(); view.month -= 1; if (view.month < 0) { view.month = 11; view.year -= 1; } build(); };
+			next.onclick = (event) => { event.stopPropagation(); view.month += 1; if (view.month > 11) { view.month = 0; view.year += 1; } build(); };
+			const week = pop.createDiv('wb-date-week'); ['周日', '周一', '周二', '周三', '周四', '周五', '周六'].forEach((label) => week.createSpan({ text: label }));
+			const grid = pop.createDiv('wb-date-grid');
+			const firstDay = new Date(view.year, view.month, 1).getDay();
+			const daysInMonth = new Date(view.year, view.month + 1, 0).getDate();
+			const daysPrev = new Date(view.year, view.month, 0).getDate();
+			const today = new Date();
+			for (let i = 0; i < 42; i += 1) {
+				let y = view.year, m = view.month, d: number;
+				if (i < firstDay) { d = daysPrev - firstDay + 1 + i; m = view.month - 1; if (m < 0) { m = 11; y -= 1; } }
+				else if (i < firstDay + daysInMonth) { d = i - firstDay + 1; }
+				else { d = i - firstDay - daysInMonth + 1; m = view.month + 1; if (m > 11) { m = 0; y += 1; } }
+				const day = grid.createEl('button', { cls: 'wb-date-day', attr: { type: 'button' }, text: String(d) });
+				if (m !== view.month) day.addClass('is-outside');
+				if (sameDay(today, y, m, d)) day.addClass('is-today');
+				if (sameDay(selected, y, m, d)) day.addClass('is-selected');
+				const cy = y, cm = m, cd = d;
+				day.onclick = (event) => { event.stopPropagation(); selected = new Date(cy, cm, cd); if (hasTime) build(); else commit(selected); };
+			}
+			if (hasTime) {
+				const timeRow = pop.createDiv('wb-date-time'); timeRow.createSpan({ text: '时间' });
+				const hourInput = timeRow.createEl('input', { cls: 'wb-date-time-input', attr: { type: 'number', min: '0', max: '23', 'aria-label': '小时' } }); hourInput.value = pad(hh);
+				timeRow.createSpan({ cls: 'wb-date-time-colon', text: ':' });
+				const minuteInput = timeRow.createEl('input', { cls: 'wb-date-time-input', attr: { type: 'number', min: '0', max: '59', 'aria-label': '分钟' } }); minuteInput.value = pad(mm);
+				hourInput.oninput = () => { hh = Math.max(0, Math.min(23, Number(hourInput.value) || 0)); };
+				minuteInput.oninput = () => { mm = Math.max(0, Math.min(59, Number(minuteInput.value) || 0)); };
+			}
+			const footer = pop.createDiv('wb-date-footer');
+			const todayBtn = footer.createEl('button', { cls: 'wb-date-today', attr: { type: 'button' }, text: '今天' });
+			todayBtn.onclick = (event) => { event.stopPropagation(); const now = new Date(); selected = new Date(now.getFullYear(), now.getMonth(), now.getDate()); if (hasTime) { hh = now.getHours(); mm = now.getMinutes(); build(); } else commit(selected); };
+			const clearBtn = footer.createEl('button', { cls: 'wb-date-clear', attr: { type: 'button' }, text: '清除' }); clearBtn.onclick = (event) => { event.stopPropagation(); commit(null); };
+			if (hasTime) { const confirmBtn = footer.createEl('button', { cls: 'wb-date-confirm mod-cta', attr: { type: 'button' }, text: '确定' }); confirmBtn.onclick = (event) => { event.stopPropagation(); commit(selected ?? new Date()); }; }
+		};
+		build();
+		this.registerChoiceMenuDismiss(pop, anchor);
 	}
 
 	private createCheckboxCell(td: HTMLElement, item: VisibleRow, column: number): HTMLElement {
@@ -657,6 +843,69 @@ export class LiteGridCsvView extends TextFileView {
 			useGrouping: field.currencyUseThousands ?? true,
 		});
 		return `${currency.symbol}${formatted}`;
+	}
+
+	private formatNumber(value: string, field: FieldSchema): string {
+		const format = field.numberFormat ?? 'raw';
+		if (format === 'raw') return value;
+		if (!value.trim()) return '';
+		const numeric = Number(value.replace(/[,，\s]/g, ''));
+		if (!Number.isFinite(numeric)) return value;
+		const percent = format === 'percent' || format === 'percent2';
+		const decimals = format === 'integer' || format === 'percent' ? 0 : format === 'percent2' ? 2 : Number(format.slice(1));
+		const scaled = percent ? numeric * 100 : numeric;
+		const formatted = scaled.toLocaleString('zh-CN', {
+			minimumFractionDigits: decimals,
+			maximumFractionDigits: decimals,
+			useGrouping: field.numberUseThousands ?? false,
+		});
+		return percent ? `${formatted}%` : formatted;
+	}
+
+	private parseDate(raw: string): Date | null {
+		const trimmed = raw.trim(); if (!trimmed) return null;
+		const match = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T ](\d{1,2}):(\d{1,2}))?/.exec(trimmed);
+		if (match) { const [, y, mo, d, hh, mm] = match; return new Date(Number(y), Number(mo) - 1, Number(d), Number(hh ?? '0'), Number(mm ?? '0')); }
+		const fallback = new Date(trimmed); return Number.isNaN(fallback.getTime()) ? null : fallback;
+	}
+
+	private formatDate(raw: string, format: DateFormat): string {
+		const date = this.parseDate(raw); if (!date) return '';
+		const pad = (value: number) => String(value).padStart(2, '0');
+		const y = date.getFullYear(), mo = date.getMonth() + 1, d = date.getDate();
+		const hh = pad(date.getHours()), mm = pad(date.getMinutes());
+		const weekday = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][date.getDay()];
+		switch (format) {
+			case 'cn': return `${y}年${mo}月${d}日`;
+			case 'slash': return `${y}/${mo}/${d}`;
+			case 'md-cn': return `${mo}月${d}日`;
+			case 'cn-week': return `${y}年${mo}月${d}日 ${weekday}`;
+			case 'cn-time': return `${y}年${mo}月${d}日 ${hh}:${mm}`;
+			case 'iso-time': return `${y}-${pad(mo)}-${pad(d)} ${hh}:${mm}`;
+			case 'us': return `${mo}/${d}/${y}`;
+			case 'eu': return `${d}/${mo}/${y}`;
+			default: return `${y}-${pad(mo)}-${pad(d)}`;
+		}
+	}
+
+	private toDateInputValue(stored: string, hasTime: boolean): string {
+		const parsed = this.parseDate(stored); if (!parsed) return '';
+		const pad = (value: number) => String(value).padStart(2, '0');
+		const base = `${parsed.getFullYear()}-${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())}`;
+		return hasTime ? `${base}T${pad(parsed.getHours())}:${pad(parsed.getMinutes())}` : base;
+	}
+
+	private cellDisplayText(field: FieldSchema, raw: string): string {
+		const value = raw ?? '';
+		switch (field.type) {
+			case 'date': return this.formatDate(value, field.dateFormat ?? 'iso');
+			case 'currency': return this.formatCurrency(value, field);
+			case 'number': return this.formatNumber(value, field);
+			case 'checkbox': return ['true', '1', '是', '✓'].includes(value.toLocaleLowerCase()) ? '✓' : '';
+			case 'attachment': return value.trim() ? this.indexDisplayName(value) : '';
+			case 'link': { const link = this.parseExternalLink(value); return link.text || link.url; }
+			default: return value;
+		}
 	}
 
 	private parseMultiValue(value: string): string[] {
@@ -894,7 +1143,7 @@ export class LiteGridCsvView extends TextFileView {
 		let frozenLeft = 40;
 		this.meta.fields.forEach((field, column) => {
 			if (!field.visible) return;
-			const statCell = add.createEl('td', { cls: 'wb-stat-cell' }); statCell.style.width = `${field.width}px`;
+			const statCell = add.createEl('td', { cls: 'wb-stat-cell' });
 			if (field.frozen) { statCell.addClass('is-frozen-column'); statCell.style.left = `${frozenLeft}px`; frozenLeft += field.width; }
 			const mode = this.meta.statistics[field.id] ?? 'none'; const stat = statCell.createEl('button', { cls: `wb-column-stat${mode === 'none' ? '' : ' has-stat'}`, attr: { 'aria-label': `${field.name}统计` } });
 			stat.createSpan({ text: mode === 'none' ? '统计' : `${this.statisticLabel(mode)} ${this.statisticValue(column, mode)}` });
@@ -922,7 +1171,7 @@ export class LiteGridCsvView extends TextFileView {
 	private addRow() { this.pushHistory(); this.rows.push(this.createEmptyRow()); this.scheduleSave(); this.render(); this.focusCell(this.rows.length - 1, 0); }
 	private createEmptyRow() { return Array.from({ length: this.headers.length }, () => ''); }
 	private setCell(row: number, column: number, value: string) { while (this.rows.length <= row) this.rows.push(this.createEmptyRow()); if (this.rows[row]) this.rows[row][column] = value; this.setStatus('未保存'); }
-	private focusCell(row: number, column: number) { window.setTimeout(() => this.contentEl.querySelector<HTMLInputElement>(`.wb-cell-input[data-row="${row}"][data-column="${column}"]`)?.focus(), 0); }
+	private focusCell(row: number, column: number) { window.setTimeout(() => { const container = this.contentEl.querySelector<HTMLElement>(`td[data-row="${row}"][data-column="${column}"]`); const target = container?.matches('input, button') ? container : container?.querySelector<HTMLElement>('input, button'); target?.focus(); if (target instanceof HTMLInputElement) target.select(); }, 0); }
 	private visibleColumnCount() { return this.meta.fields.filter((field) => field.visible).length; }
 	private isSelected(row: number, column: number) { if (!this.selection) return false; const minRow = Math.min(this.selection.startRow, this.selection.endRow); const maxRow = Math.max(this.selection.startRow, this.selection.endRow); const minColumn = Math.min(this.selection.startColumn, this.selection.endColumn); const maxColumn = Math.max(this.selection.startColumn, this.selection.endColumn); return row >= minRow && row <= maxRow && column >= minColumn && column <= maxColumn; }
 	private displayedRowEnd() { return Math.max(6, this.rows.length - 1); }
@@ -957,14 +1206,31 @@ export class LiteGridCsvView extends TextFileView {
 		cell.addClass('is-selected', 'is-selection-left'); cell.toggleClass('is-selection-top', row === bounds.minRow); cell.toggleClass('is-selection-bottom', row === bounds.maxRow); cell.toggleClass('is-selection-range', bounds.isRange);
 	}
 	private selectedCoordinates() { const result: Array<{ row: number; column: number }> = []; if (!this.selection) return result; const minRow = Math.max(0, Math.min(this.selection.startRow, this.selection.endRow)); const maxRow = Math.min(Math.max(0, this.rows.length - 1), Math.max(this.selection.startRow, this.selection.endRow)); const minColumn = Math.max(0, Math.min(this.selection.startColumn, this.selection.endColumn)); const maxColumn = Math.min(this.headers.length - 1, Math.max(this.selection.startColumn, this.selection.endColumn)); for (let row = minRow; row <= maxRow; row += 1) for (let column = minColumn; column <= maxColumn; column += 1) result.push({ row, column }); return result; }
-	private selectionText() { if (!this.selection) return ''; const minRow = Math.min(this.selection.startRow, this.selection.endRow); const maxRow = Math.max(this.selection.startRow, this.selection.endRow); const minColumn = Math.min(this.selection.startColumn, this.selection.endColumn); const maxColumn = Math.max(this.selection.startColumn, this.selection.endColumn); return Array.from({ length: maxRow - minRow + 1 }, (_, offset) => this.rows[minRow + offset]?.slice(minColumn, maxColumn + 1).join('\t') ?? '').join('\n'); }
+	private selectionText() { if (!this.selection) return ''; const minRow = Math.max(0, Math.min(this.selection.startRow, this.selection.endRow)); const maxRow = Math.min(this.rows.length - 1, Math.max(this.selection.startRow, this.selection.endRow)); const minColumn = Math.max(0, Math.min(this.selection.startColumn, this.selection.endColumn)); const maxColumn = Math.min(this.headers.length - 1, Math.max(this.selection.startColumn, this.selection.endColumn)); if (maxRow < minRow) return ''; return Array.from({ length: maxRow - minRow + 1 }, (_, offset) => this.rows[minRow + offset]?.slice(minColumn, maxColumn + 1).join('\t') ?? '').join('\n'); }
 	private applySelectionClasses() {
 		this.contentEl.querySelectorAll<HTMLElement>('td[data-row][data-column]').forEach((cell) => this.applySelectionClassesToCell(cell, Number(cell.dataset.row), Number(cell.dataset.column)));
 		this.contentEl.querySelectorAll<HTMLElement>('th.wb-row-number[data-row]').forEach((cell) => this.applyRowHeadSelectionClasses(cell, Number(cell.dataset.row)));
 		this.contentEl.querySelectorAll<HTMLElement>('tr[data-row]').forEach((row) => row.toggleClass('is-active-row', Number(row.dataset.row) === this.selection?.startRow));
 	}
 
-	private startResize(event: MouseEvent, column: number) { event.preventDefault(); event.stopPropagation(); const field = this.meta.fields[column]; if (!field) return; const startX = event.clientX; const startWidth = field.width; const move = (moveEvent: MouseEvent) => { field.width = Math.max(100, Math.min(600, startWidth + moveEvent.clientX - startX)); this.contentEl.querySelectorAll<HTMLElement>(`[data-column="${column}"]`).forEach((cell) => { cell.style.width = `${field.width}px`; }); }; const up = () => { document.removeEventListener('mousemove', move); document.removeEventListener('mouseup', up); this.scheduleMetaSave(); }; document.addEventListener('mousemove', move); document.addEventListener('mouseup', up); }
+	private startResize(event: MouseEvent, column: number) {
+		event.preventDefault(); event.stopPropagation();
+		const field = this.meta.fields[column]; if (!field) return;
+		const startX = event.clientX; const startWidth = field.width;
+		const doc = this.containerEl.ownerDocument;
+		const col = this.contentEl.querySelector<HTMLElement>(`col[data-column="${column}"]`);
+		const tip = this.contentEl.createDiv('wb-resize-tip');
+		const moveTip = (width: number, clientX: number, clientY: number) => { const rootRect = this.contentEl.getBoundingClientRect(); tip.setText(`列宽 ${width} 像素`); tip.style.left = `${Math.min(clientX - rootRect.left + 12, rootRect.width - tip.offsetWidth - 8)}px`; tip.style.top = `${clientY - rootRect.top - 34}px`; };
+		doc.body.addClass('wb-resizing');
+		moveTip(startWidth, startX, event.clientY);
+		const move = (moveEvent: MouseEvent) => {
+			const width = Math.max(48, Math.min(720, startWidth + moveEvent.clientX - startX)); field.width = width;
+			if (col) col.style.width = `${width}px`;
+			moveTip(width, moveEvent.clientX, moveEvent.clientY);
+		};
+		const up = () => { doc.removeEventListener('mousemove', move); doc.removeEventListener('mouseup', up); doc.body.removeClass('wb-resizing'); tip.remove(); this.scheduleMetaSave(); this.renderGridOnly(); };
+		doc.addEventListener('mousemove', move); doc.addEventListener('mouseup', up);
+	}
 
 	private openRowHeightMenu(toolbar: HTMLElement) { this.closeContextMenu(); const button = toolbar.querySelector<HTMLElement>('[data-action="行高"]'); if (!button) return; const rect = button.getBoundingClientRect(); const rootRect = this.contentEl.getBoundingClientRect(); const menu = this.contentEl.createDiv('wb-context-menu wb-row-height-menu'); this.contextMenu = menu; menu.style.left = `${rect.left - rootRect.left}px`; menu.style.top = `${rect.bottom - rootRect.top + 4}px`; ([['default', '默认'], ['medium', '中等'], ['spacious', '宽松'], ['extra', '超宽']] as Array<[RowHeight, string]>).forEach(([value, label]) => this.addMenuItem(menu, label, value === this.meta.rowHeight ? 'check' : '', () => { this.meta.rowHeight = value; this.scheduleMetaSave(); this.closeContextMenu(); this.render(); })); }
 	private openHeaderContextMenu(anchor: HTMLElement, column: number) { const rect = anchor.getBoundingClientRect(); this.openContextMenu(rect.right - 180, rect.bottom, this.headerMenuItems(column)); }
@@ -1004,15 +1270,24 @@ export class LiteGridCsvView extends TextFileView {
 		{ label: '删除字段', icon: 'trash-2', danger: true, action: () => this.deleteColumn(column) },
 	]; }
 	private rowMenuItems(row: number): MenuItem[] { return [ { label: '创建副本', icon: 'files', action: () => this.duplicateRow(row) }, { label: '在上方插入', icon: 'arrow-up', quantityAction: (count) => this.insertRows(row, count) }, { label: '在下方插入', icon: 'arrow-down', quantityAction: (count) => this.insertRows(row + 1, count) }, { label: '删除', icon: 'trash-2', danger: true, action: () => this.deleteRows() } ]; }
-	private cellMenuItems(row: number, column: number): MenuItem[] { return [ { label: '不看已填写', icon: 'filter', action: () => { this.meta.filters.push({ id: uid('filter'), column, operator: 'empty', value: '' }); this.scheduleMetaSave(); this.render(); } }, { label: '只看未填写', icon: 'filter', action: () => { this.meta.filters.push({ id: uid('filter'), column, operator: 'empty', value: '' }); this.scheduleMetaSave(); this.render(); } }, { divider: true }, ...this.rowMenuItems(row) ]; }
+	private cellMenuItems(row: number, column: number): MenuItem[] { return [ { label: '只看已填写', icon: 'filter', action: () => { this.meta.filters.push({ id: uid('filter'), column, operator: 'not-empty', value: '' }); this.scheduleMetaSave(); this.render(); } }, { label: '只看未填写', icon: 'filter', action: () => { this.meta.filters.push({ id: uid('filter'), column, operator: 'empty', value: '' }); this.scheduleMetaSave(); this.render(); } }, { divider: true }, ...this.rowMenuItems(row) ]; }
 
+	private moveRow(from: number, to: number) {
+		if (this.meta.sorts.length) { new Notice('清除排序后才能手动拖拽调整行顺序'); return; }
+		const maxIndex = this.rows.length - 1; if (maxIndex < 0) return;
+		const source = Math.max(0, Math.min(maxIndex, from)); const target = Math.max(0, Math.min(maxIndex, to));
+		if (source === target) return;
+		this.pushHistory(); const [moved] = this.rows.splice(source, 1); if (moved) this.rows.splice(target, 0, moved);
+		this.selection = { startRow: target, endRow: target, startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.scheduleSave(); this.render();
+	}
 	private insertRows(index: number, count: number) { this.pushHistory(); this.rows.splice(index, 0, ...Array.from({ length: count }, () => this.createEmptyRow())); this.scheduleSave(); this.render(); }
 	private duplicateRow(index: number) { this.pushHistory(); this.rows.splice(index + 1, 0, [...(this.rows[index] ?? this.createEmptyRow())]); this.scheduleSave(); this.render(); }
 	private deleteRows() { this.pushHistory(); const rows = [...new Set(this.selectedCoordinates().map((item) => item.row))].sort((a, b) => b - a); rows.forEach((row) => this.rows.splice(row, 1)); this.selection = null; this.scheduleSave(); this.render(); }
 	private insertColumn(index: number) { this.pushHistory(); const field = this.newField(`字段 ${index + 1}`, index); this.headers.splice(index, 0, field.name); this.meta.fields.splice(index, 0, field); this.rows.forEach((row) => row.splice(index, 0, '')); this.shiftRuleColumns(index, 1); this.scheduleSave(); this.scheduleMetaSave(); this.render(); }
 	private duplicateColumn(index: number) { this.pushHistory(); const source = this.meta.fields[index]; if (!source) return; const copy = { ...source, id: uid('field'), name: `${source.name} 副本`, options: source.options.map((option) => ({ ...option, id: uid('option') })) }; this.headers.splice(index + 1, 0, copy.name); this.meta.fields.splice(index + 1, 0, copy); this.rows.forEach((row) => row.splice(index + 1, 0, row[index] ?? '')); this.shiftRuleColumns(index + 1, 1); this.scheduleSave(); this.scheduleMetaSave(); this.render(); }
-	private deleteColumn(index: number) { if (this.headers.length <= 1) { new Notice('至少保留一个字段'); return; } this.pushHistory(); this.headers.splice(index, 1); this.meta.fields.splice(index, 1); this.rows.forEach((row) => row.splice(index, 1)); this.meta.filters = this.adjustRulesAfterDelete(this.meta.filters, index); this.meta.sorts = this.adjustRulesAfterDelete(this.meta.sorts, index); this.meta.groups = this.adjustRulesAfterDelete(this.meta.groups, index); this.meta.fills = this.adjustRulesAfterDelete(this.meta.fills, index); this.scheduleSave(); this.scheduleMetaSave(); this.render(); }
+	private deleteColumn(index: number) { if (this.headers.length <= 1) { new Notice('至少保留一个字段'); return; } this.pushHistory(); const removed = this.meta.fields[index]; this.headers.splice(index, 1); this.meta.fields.splice(index, 1); this.rows.forEach((row) => row.splice(index, 1)); if (removed) delete this.meta.statistics[removed.id]; this.meta.filters = this.adjustRulesAfterDelete(this.meta.filters, index); this.meta.sorts = this.adjustRulesAfterDelete(this.meta.sorts, index); this.meta.groups = this.adjustRulesAfterDelete(this.meta.groups, index); this.meta.fills = this.adjustRulesAfterDelete(this.meta.fills, index); this.scheduleSave(); this.scheduleMetaSave(); this.render(); }
 	private shiftRuleColumns(index: number, delta: number) { [...this.meta.filters, ...this.meta.sorts, ...this.meta.groups, ...this.meta.fills].forEach((rule) => { if (rule.column >= index) rule.column += delta; }); }
 	private adjustRulesAfterDelete<T extends { column: number }>(rules: T[], index: number): T[] { return rules.filter((rule) => rule.column !== index).map((rule) => ({ ...rule, column: rule.column > index ? rule.column - 1 : rule.column })); }
-	private fitColumn(index: number) { const field = this.meta.fields[index]; if (!field) return; const max = Math.max(field.name.length, ...this.rows.map((row) => (row[index] ?? '').length)); field.width = Math.max(100, Math.min(420, 64 + max * 14)); this.scheduleMetaSave(); this.render(); }
+	private displayWidth(text: string): number { let width = 0; for (const char of text) { const code = char.codePointAt(0) ?? 0; width += code >= 0x1100 && !(code >= 0xff61 && code <= 0xff9f) ? 2 : 1; } return width; }
+	private fitColumn(index: number) { const field = this.meta.fields[index]; if (!field) return; const max = Math.max(this.displayWidth(field.name), ...this.rows.map((row) => this.displayWidth(row[index] ?? ''))); field.width = Math.max(100, Math.min(420, 56 + max * 9)); this.scheduleMetaSave(); this.render(); }
 }
