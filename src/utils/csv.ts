@@ -6,33 +6,30 @@ export interface CsvDocument {
 	trailingEol: boolean;
 }
 
-function countDelimiter(line: string, delimiter: string): number {
-	let count = 0;
-	let quoted = false;
-	for (let index = 0; index < line.length; index += 1) {
-		const char = line[index];
+function countDelimiter(source: string, delimiter: string): number {
+	let count = 0, quoted = false, fieldStart = true;
+	for (let index = 0; index < source.length; index += 1) {
+		const char = source[index];
 		if (char === '"') {
-			if (quoted && line[index + 1] === '"') index += 1;
-			else quoted = !quoted;
-		} else if (!quoted && char === delimiter) {
-			count += 1;
-		}
+			if (quoted && source[index + 1] === '"') index += 1;
+			else if (quoted) quoted = false;
+			else if (fieldStart) quoted = true;
+			fieldStart = false;
+		} else if (!quoted && (char === '\n' || char === '\r')) break;
+		else if (!quoted && char === delimiter) { count += 1; fieldStart = true; }
+		else fieldStart = false;
 	}
 	return count;
 }
 
 function detectDelimiter(source: string): string {
-	const line = source.split(/\r?\n/, 1)[0] ?? '';
-	const candidates = [',', '\t', ';'];
-	return candidates.sort(
-		(left, right) => countDelimiter(line, right) - countDelimiter(line, left),
-	)[0] ?? ',';
+	return [',', '\t', ';'].sort((left, right) => countDelimiter(source, right) - countDelimiter(source, left))[0] ?? ',';
 }
 
-export function parseCsv(source: string): CsvDocument {
+export function parseCsv(source: string, explicitDelimiter?: string): CsvDocument {
 	const bom = source.startsWith('\uFEFF');
 	const text = bom ? source.slice(1) : source;
-	const delimiter = detectDelimiter(text);
+	const delimiter = explicitDelimiter ?? detectDelimiter(text);
 	const eol = text.includes('\r\n') ? '\r\n' : '\n';
 	const trailingEol = /[\r\n]$/.test(text);
 	const rows: string[][] = [];
@@ -75,7 +72,7 @@ export function parseCsv(source: string): CsvDocument {
 }
 
 function quoteCell(value: string, delimiter: string): string {
-	if (!value.includes(delimiter) && !/[\r\n]/.test(value) && !value.startsWith('"')) return value;
+	if (!value.includes(delimiter) && !/[\r\n]/.test(value) && !value.includes('"')) return value;
 	return `"${value.replaceAll('"', '""')}"`;
 }
 

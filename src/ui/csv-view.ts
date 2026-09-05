@@ -69,6 +69,8 @@ export class LiteGridCsvView extends TextFileView {
 	private collapsedGroups = new Set<string>();
 	private contextMenu: HTMLElement | null = null;
 	private history: string[] = [];
+	private displayedRows: number[] | null = null;
+	private selectedRowCache: { order: number[]; start: number; end: number; rows: number[]; members: Set<number> } | null = null;
 	private historyIndex = -1;
 	private undoButton: HTMLButtonElement | null = null;
 	private redoButton: HTMLButtonElement | null = null;
@@ -232,7 +234,7 @@ export class LiteGridCsvView extends TextFileView {
 		const right = toolbar.createDiv('wb-toolbar-right');
 		this.undoButton = this.addIconButton(right, 'undo-2', '撤销', () => this.undo());
 		this.redoButton = this.addIconButton(right, 'redo-2', '重做', () => this.redo());
-		this.undoButton.disabled = this.history.length === 0 || (this.historyIndex <= 0 && this.history[this.historyIndex] === this.getViewData());
+		this.undoButton.disabled = this.history.length === 0 || (this.historyIndex <= 0 && this.history[this.historyIndex] === this.captureSnapshot());
 		this.redoButton.disabled = this.historyIndex >= this.history.length - 1;
 		const searchToggle = this.addIconButton(right, 'search', '搜索', () => {
 			this.searchVisible = !this.searchVisible;
@@ -315,8 +317,12 @@ export class LiteGridCsvView extends TextFileView {
 		if (changed) { this.scheduleSave(); this.render(); }
 	}
 
+	private captureSnapshot(): string {
+		return JSON.stringify({ csv: this.getViewData(), meta: this.meta });
+	}
+
 	private pushHistory() {
-		const snapshot = this.getViewData();
+		const snapshot = this.captureSnapshot();
 		if (this.history[this.historyIndex] === snapshot) return;
 		this.history = this.history.slice(0, this.historyIndex + 1);
 		this.history.push(snapshot);
@@ -325,8 +331,9 @@ export class LiteGridCsvView extends TextFileView {
 	}
 
 	private applySnapshot(snapshot: string) {
-		this.data = snapshot;
-		this.document = parseCsv(snapshot);
+		const restored = JSON.parse(snapshot) as { csv: string; meta: TableMeta };
+		this.data = restored.csv;
+		this.document = parseCsv(restored.csv);
 		const [header, ...body] = this.document.rows;
 		if (header?.some((cell) => cell.length > 0)) {
 			const width = body.reduce((max, row) => Math.max(max, row.length), header.length);
@@ -334,7 +341,9 @@ export class LiteGridCsvView extends TextFileView {
 			this.rows = normalizeRows(body, width);
 		}
 		else { this.headers = [...DEFAULT_HEADERS]; this.rows = []; }
-		this.meta = this.reconcileMeta(this.meta, this.headers);
+		this.meta = restored.meta;
+		this.displayedRows = null;
+		this.scheduleMetaSave();
 		this.render();
 	}
 
@@ -536,6 +545,7 @@ export class LiteGridCsvView extends TextFileView {
 	}
 
 	private renderGrid(page: HTMLElement) {
+		this.displayedRows = null;
 		const shell = page.createDiv('wb-grid-shell'); const table = shell.createEl('table', { cls: 'wb-grid' }); this.renderColgroup(table); this.renderHeader(table); const body = table.createEl('tbody'); const visible = this.getVisibleRows();
 		if (this.meta.groups.length) this.renderGroupedRows(body, visible); else this.renderPlainRows(body, visible);
 		this.renderAddRow(body);
@@ -551,14 +561,14 @@ export class LiteGridCsvView extends TextFileView {
 	private renderHeader(table: HTMLTableElement) {
 		const head = table.createEl('thead').createEl('tr'); const corner = head.createEl('th', { cls: 'wb-row-number wb-corner-cell' }); const selectAll = corner.createEl('button', { cls: 'wb-select-all', attr: { 'aria-label': '全选' } });
 		const allSelected = this.isAllSelected(); selectAll.toggleClass('is-checked', allSelected); selectAll.setAttribute('aria-pressed', String(allSelected)); if (allSelected) setIcon(selectAll, 'check');
-		selectAll.onclick = () => { this.selection = allSelected ? null : { startRow: 0, endRow: this.displayedRowEnd(), startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.renderGridOnly(); };
+		selectAll.onclick = () => { this.selection = allSelected ? null : { startRow: this.getDisplayedRows()[0] ?? 0, endRow: this.getDisplayedRows()[this.getDisplayedRows().length - 1] ?? 0, startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.renderGridOnly(); };
 		let frozenLeft = 40;
 		this.meta.fields.forEach((field, columnIndex) => {
 			if (!field.visible) return; const th = head.createEl('th'); th.dataset.column = String(columnIndex);
 			if (field.frozen) { th.addClass('is-frozen-column'); th.style.left = `${frozenLeft}px`; frozenLeft += field.width; }
 			const button = th.createEl('button', { cls: 'wb-column-header' }); button.dataset.column = String(columnIndex); this.renderFieldTypeIcon(button, field.type); button.createSpan({ cls: 'wb-column-title', text: field.name }); const chevron = button.createSpan('wb-column-chevron'); setIcon(chevron, 'chevron-down');
 			button.onclick = (event) => { if ((event.target as HTMLElement).closest('.wb-column-chevron')) this.openHeaderContextMenu(button, columnIndex); else this.openFieldEditor(button, columnIndex); };
-			button.oncontextmenu = (event) => { event.preventDefault(); this.selection = { startRow: 0, endRow: Math.max(0, this.rows.length - 1), startColumn: columnIndex, endColumn: columnIndex }; this.openContextMenu(event.clientX, event.clientY, this.headerMenuItems(columnIndex)); };
+			button.oncontextmenu = (event) => { event.preventDefault(); this.selection = { startRow: this.getDisplayedRows()[0] ?? 0, endRow: this.getDisplayedRows()[this.getDisplayedRows().length - 1] ?? 0, startColumn: columnIndex, endColumn: columnIndex }; this.openContextMenu(event.clientX, event.clientY, this.headerMenuItems(columnIndex)); };
 			const resizer = th.createDiv('wb-column-resizer'); resizer.onmousedown = (event) => this.startResize(event, columnIndex);
 		});
 		const addField = head.createEl('th', { cls: 'wb-add-field-head' }); const addButton = addField.createEl('button'); setIcon(addButton.createSpan(), 'plus'); addButton.createSpan({ text: '字段' }); addButton.onclick = () => this.insertColumn(this.headers.length);
@@ -1154,40 +1164,100 @@ export class LiteGridCsvView extends TextFileView {
 
 	private getVisibleRows(): VisibleRow[] {
 		const result = this.rows.map((row, index) => ({ row, index })).filter(({ row }) => this.meta.filters.every((rule) => this.matches(row[rule.column] ?? '', rule)));
-		if (this.meta.sorts.length) result.sort((left, right) => { for (const rule of this.meta.sorts) { const comparison = (left.row[rule.column] ?? '').localeCompare(right.row[rule.column] ?? '', 'zh-CN', { numeric: true }); if (comparison) return comparison * (rule.direction === 'asc' ? 1 : -1); } return left.index - right.index; }); return result;
+		if (this.meta.sorts.length) result.sort((left, right) => {
+			for (const rule of this.meta.sorts) {
+				const comparison = this.compareValues(left.row[rule.column] ?? '', right.row[rule.column] ?? '', this.meta.fields[rule.column]);
+				if (comparison) return comparison * (rule.direction === 'asc' ? 1 : -1);
+			}
+			return left.index - right.index;
+		});
+		return result;
+	}
+	private compareValues(left: string, right: string, field?: FieldSchema): number {
+		if (field?.type === 'number' || field?.type === 'currency' || field?.type === 'date') {
+			const numeric = (value: string): number => !value.trim() ? NaN : field.type === 'date'
+				? this.parseDate(value)?.getTime() ?? NaN : Number(value.replace(/[,，\s¥$€£]/g, ''));
+			const a = numeric(left), b = numeric(right);
+			if (Number.isFinite(a) && Number.isFinite(b)) return a - b;
+			if (Number.isFinite(a)) return -1;
+			if (Number.isFinite(b)) return 1;
+		}
+		return left.localeCompare(right, 'zh-CN', { numeric: true });
+	}
+	private getDisplayedRows(): number[] {
+		if (this.displayedRows) return this.displayedRows;
+		const visible = this.getVisibleRows();
+		const blanks = Array.from({ length: Math.max(0, 7 - visible.length) }, (_, offset) => this.rows.length + offset);
+		if (!this.meta.groups.length) return this.displayedRows = [...visible.map(item => item.index), ...blanks];
+		const column = this.meta.groups[0]!.column;
+		const groups = new Map<string, number[]>();
+		visible.forEach(item => { const key = item.row[column]?.trim() || '(空)'; const bucket = groups.get(key) ?? []; bucket.push(item.index); groups.set(key, bucket); });
+		if (blanks.length) groups.set('(空)', [...(groups.get('(空)') ?? []), ...blanks]);
+		return this.displayedRows = [...groups].flatMap(([key, rows]) => this.collapsedGroups.has(key) ? [] : rows);
+	}
+	private selectedRows(): number[] {
+		if (!this.selection) return [];
+		const visible = this.getDisplayedRows();
+		const { startRow: start, endRow: end } = this.selection;
+		if (this.selectedRowCache?.order === visible && this.selectedRowCache.start === start && this.selectedRowCache.end === end) return this.selectedRowCache.rows;
+		const a = visible.indexOf(start), b = visible.indexOf(end);
+		const rows = a < 0 || b < 0 ? [] : visible.slice(Math.min(a, b), Math.max(a, b) + 1);
+		this.selectedRowCache = { order: visible, start, end, rows, members: new Set(rows) };
+		return rows;
+	}
+	private selectedColumns(): number[] {
+		if (!this.selection) return [];
+		const { startColumn, endColumn } = this.selection;
+		return this.meta.fields.flatMap((field, index) => field.visible && index >= Math.min(startColumn, endColumn) && index <= Math.max(startColumn, endColumn) ? [index] : []);
 	}
 	private matches(value: string, rule: FilterRule | FillRule): boolean { const source = value.toLocaleLowerCase(); const target = rule.value.toLocaleLowerCase(); switch (rule.operator) { case 'all': return true; case 'eq': return source === target; case 'neq': return source !== target; case 'contains': return source.includes(target); case 'not-contains': return !source.includes(target); case 'empty': return value.trim() === ''; case 'not-empty': return value.trim() !== ''; } }
 	private getFill(row: string[], column: number): FillRule | undefined { return this.meta.fills.find((rule) => rule.column === column && this.matches(row[column] ?? '', rule)); }
 
 	private handleCellKey(event: KeyboardEvent, row: number, column: number) {
+		if (event.isComposing) return;
 		if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'c') { event.preventDefault(); void navigator.clipboard.writeText(this.selectionText()); return; }
-		if (!['Enter', 'Tab', 'ArrowUp', 'ArrowDown'].includes(event.key)) return; event.preventDefault(); let nextRow = row; let nextColumn = column;
-		if (event.key === 'Enter' || event.key === 'ArrowDown') nextRow += 1; if (event.key === 'ArrowUp') nextRow -= 1; if (event.key === 'Tab') nextColumn += event.shiftKey ? -1 : 1;
-		if (nextColumn >= this.headers.length) { nextColumn = 0; nextRow += 1; } if (nextColumn < 0) { nextColumn = this.headers.length - 1; nextRow -= 1; } if (nextRow >= this.rows.length) this.rows.push(this.createEmptyRow());
-		this.scheduleSave(); this.render(); this.focusCell(Math.max(0, nextRow), Math.max(0, nextColumn));
+		if (!['Enter', 'Tab', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+		event.preventDefault();
+		const rows = this.getDisplayedRows(), columns = this.meta.fields.flatMap((field, index) => field.visible ? [index] : []);
+		let r = rows.indexOf(row), c = columns.indexOf(column);
+		if (r < 0 || c < 0) return;
+		if (event.key === 'Enter' || event.key === 'ArrowDown') r += 1;
+		if (event.key === 'ArrowUp') r -= 1;
+		if (event.key === 'Tab') c += event.shiftKey ? -1 : 1;
+		if (c >= columns.length) { c = 0; r += 1; }
+		if (c < 0) { c = columns.length - 1; r -= 1; }
+		// Navigation alone never changes file contents, including blank placeholder rows.
+		this.focusCell(rows[Math.max(0, Math.min(rows.length - 1, r))]!, columns[c]!);
 	}
-	private handlePaste(event: ClipboardEvent, startRow: number, startColumn: number) { const text = event.clipboardData?.getData('text/plain'); if (!text || (!text.includes('\t') && !text.includes('\n'))) return; event.preventDefault(); this.pushHistory(); text.replace(/\r\n/g, '\n').split('\n').filter((line, index, all) => line.length > 0 || index < all.length - 1).forEach((line, rowOffset) => { line.split('\t').forEach((value, columnOffset) => { if (startColumn + columnOffset < this.headers.length) this.setCell(startRow + rowOffset, startColumn + columnOffset, value); }); }); this.scheduleSave(); this.render(); }
+	private handlePaste(event: ClipboardEvent, startRow: number, startColumn: number) {
+		const text = event.clipboardData?.getData('text/plain');
+		if (!text || (!text.includes('\t') && !/[\r\n]/.test(text))) return;
+		event.preventDefault();
+		const targets = this.getDisplayedRows().slice();
+		const first = targets.indexOf(startRow);
+		if (first < 0) return;
+		const columns = this.meta.fields.flatMap((field, index) => field.visible && index >= startColumn ? [index] : []);
+		this.pushHistory();
+		parseCsv(text, '\t').rows.forEach((cells, offset) => {
+			const row = targets[first + offset] ?? this.rows.length;
+			cells.forEach((value, index) => { const column = columns[index]; if (column !== undefined) this.setCell(row, column, value); });
+		});
+		this.scheduleSave(); this.render();
+	}
 
 	private addRow() { this.pushHistory(); this.rows.push(this.createEmptyRow()); this.scheduleSave(); this.render(); this.focusCell(this.rows.length - 1, 0); }
 	private createEmptyRow() { return Array.from({ length: this.headers.length }, () => ''); }
 	private setCell(row: number, column: number, value: string) { while (this.rows.length <= row) this.rows.push(this.createEmptyRow()); if (this.rows[row]) this.rows[row][column] = value; this.setStatus('未保存'); }
 	private focusCell(row: number, column: number) { window.setTimeout(() => { const container = this.contentEl.querySelector<HTMLElement>(`td[data-row="${row}"][data-column="${column}"]`); const target = container?.matches('input, button') ? container : container?.querySelector<HTMLElement>('input, button'); target?.focus(); if (target instanceof HTMLInputElement) target.select(); }, 0); }
 	private visibleColumnCount() { return this.meta.fields.filter((field) => field.visible).length; }
-	private isSelected(row: number, column: number) { if (!this.selection) return false; const minRow = Math.min(this.selection.startRow, this.selection.endRow); const maxRow = Math.max(this.selection.startRow, this.selection.endRow); const minColumn = Math.min(this.selection.startColumn, this.selection.endColumn); const maxColumn = Math.max(this.selection.startColumn, this.selection.endColumn); return row >= minRow && row <= maxRow && column >= minColumn && column <= maxColumn; }
-	private displayedRowEnd() { return Math.max(6, this.rows.length - 1); }
+	private isSelected(row: number, column: number) { this.selectedRows(); return !!this.selection && !!this.selectedRowCache?.members.has(row) && this.selectedColumns().includes(column); }
 	private isAllSelected() {
-		if (!this.selection) return false;
-		const minRow = Math.min(this.selection.startRow, this.selection.endRow); const maxRow = Math.max(this.selection.startRow, this.selection.endRow);
-		const minColumn = Math.min(this.selection.startColumn, this.selection.endColumn); const maxColumn = Math.max(this.selection.startColumn, this.selection.endColumn);
-		return minRow === 0 && maxRow >= this.displayedRowEnd() && minColumn === 0 && maxColumn >= this.headers.length - 1;
+		return this.selectedRows().length > 0 && this.selectedRows().length === this.getDisplayedRows().length && this.selectedColumns().length === this.visibleColumnCount();
 	}
 	private selectionBounds() {
-		if (!this.selection) return null;
-		const minRow = Math.min(this.selection.startRow, this.selection.endRow); const maxRow = Math.max(this.selection.startRow, this.selection.endRow);
-		const minColumn = Math.min(this.selection.startColumn, this.selection.endColumn); const maxColumn = Math.max(this.selection.startColumn, this.selection.endColumn);
-		const visibleColumns = this.meta.fields.map((field, index) => field.visible && index >= minColumn && index <= maxColumn ? index : -1).filter((index) => index >= 0);
-		if (!visibleColumns.length) return null;
-		return { minRow, maxRow, minColumn, maxColumn, leftColumn: visibleColumns[0]!, rightColumn: visibleColumns[visibleColumns.length - 1]!, isRange: minRow !== maxRow || visibleColumns.length > 1 };
+		const rows = this.selectedRows(), columns = this.selectedColumns();
+		if (!rows.length || !columns.length) return null;
+		return { minRow: rows[0]!, maxRow: rows[rows.length - 1]!, minColumn: columns[0]!, maxColumn: columns[columns.length - 1]!, leftColumn: columns[0]!, rightColumn: columns[columns.length - 1]!, isRange: rows.length > 1 || columns.length > 1 };
 	}
 	private applySelectionClassesToCell(cell: HTMLElement, row: number, column: number) {
 		const bounds = this.selectionBounds(); const selected = this.isSelected(row, column); cell.toggleClass('is-selected', selected);
@@ -1200,13 +1270,18 @@ export class LiteGridCsvView extends TextFileView {
 	private applyRowHeadSelectionClasses(cell: HTMLElement, row: number) {
 		const bounds = this.selectionBounds();
 		const visible = this.meta.fields.map((field, index) => field.visible ? index : -1).filter((index) => index >= 0);
-		const fullRow = !!bounds && row >= bounds.minRow && row <= bounds.maxRow && bounds.minColumn <= (visible[0] ?? 0) && bounds.maxColumn >= (visible[visible.length - 1] ?? 0);
+		const fullRow = !!bounds && this.selectedRowCache?.members.has(row) && bounds.minColumn <= (visible[0] ?? 0) && bounds.maxColumn >= (visible[visible.length - 1] ?? 0);
 		['is-selected', 'is-selection-top', 'is-selection-bottom', 'is-selection-left', 'is-selection-range'].forEach((name) => cell.removeClass(name));
 		if (!fullRow || !bounds) return;
 		cell.addClass('is-selected', 'is-selection-left'); cell.toggleClass('is-selection-top', row === bounds.minRow); cell.toggleClass('is-selection-bottom', row === bounds.maxRow); cell.toggleClass('is-selection-range', bounds.isRange);
 	}
-	private selectedCoordinates() { const result: Array<{ row: number; column: number }> = []; if (!this.selection) return result; const minRow = Math.max(0, Math.min(this.selection.startRow, this.selection.endRow)); const maxRow = Math.min(Math.max(0, this.rows.length - 1), Math.max(this.selection.startRow, this.selection.endRow)); const minColumn = Math.max(0, Math.min(this.selection.startColumn, this.selection.endColumn)); const maxColumn = Math.min(this.headers.length - 1, Math.max(this.selection.startColumn, this.selection.endColumn)); for (let row = minRow; row <= maxRow; row += 1) for (let column = minColumn; column <= maxColumn; column += 1) result.push({ row, column }); return result; }
-	private selectionText() { if (!this.selection) return ''; const minRow = Math.max(0, Math.min(this.selection.startRow, this.selection.endRow)); const maxRow = Math.min(this.rows.length - 1, Math.max(this.selection.startRow, this.selection.endRow)); const minColumn = Math.max(0, Math.min(this.selection.startColumn, this.selection.endColumn)); const maxColumn = Math.min(this.headers.length - 1, Math.max(this.selection.startColumn, this.selection.endColumn)); if (maxRow < minRow) return ''; return Array.from({ length: maxRow - minRow + 1 }, (_, offset) => this.rows[minRow + offset]?.slice(minColumn, maxColumn + 1).join('\t') ?? '').join('\n'); }
+	private selectedCoordinates() {
+		return this.selectedRows().filter(row => row < this.rows.length).flatMap(row => this.selectedColumns().map(column => ({ row, column })));
+	}
+	private selectionText() {
+		const rows = this.selectedRows().filter(row => row < this.rows.length);
+		return serializeCsv({ rows: rows.map(row => this.selectedColumns().map(column => this.rows[row]?.[column] ?? '')), delimiter: '\t', eol: '\n', bom: false, trailingEol: false });
+	}
 	private applySelectionClasses() {
 		this.contentEl.querySelectorAll<HTMLElement>('td[data-row][data-column]').forEach((cell) => this.applySelectionClassesToCell(cell, Number(cell.dataset.row), Number(cell.dataset.column)));
 		this.contentEl.querySelectorAll<HTMLElement>('th.wb-row-number[data-row]').forEach((cell) => this.applyRowHeadSelectionClasses(cell, Number(cell.dataset.row)));
