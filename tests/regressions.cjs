@@ -16,7 +16,7 @@ function load(file) {
 		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
 	}).outputText;
 	const requireStub = name => name === 'obsidian'
-		? { TextFileView: class { getState() { return { file: 'page.html' }; } async setState() {} }, Modal: class {}, Notice: class {}, TFile: class {}, normalizePath: value => value, setIcon() {} }
+		? { TextFileView: class { getState() { return { file: 'page.html' }; } async setState() {} }, Modal: class {}, Notice: class {}, Plugin: class {}, TFile: class {}, TFolder: class {}, normalizePath: value => value, setIcon() {} }
 		: load(path.resolve(path.dirname(file), `${name}.ts`));
 	vm.runInThisContext(`(function(require,module,exports){${code}\n})`, { filename: file })(requireStub, module, module.exports);
 	return module.exports;
@@ -135,6 +135,51 @@ test('CSV delimiter detection respects multiline and mid-field quotes', () => {
 });
 test('CSV retains BOM, CRLF, wide rows and trailing newline', () => {
 	const source='\uFEFFa,b\r\n1,2,3\r\n'; assert.equal(serializeCsv(parseCsv(source)),source);
+});
+
+const { default: LiteGridPlugin } = load(root + '/src/main.ts');
+test('renaming or moving tables and folders carries table settings along', async () => {
+	const p = Object.create(LiteGridPlugin.prototype); let saves = 0; p.saveData = async () => { saves++; };
+	p.pluginData = { tables: { '\u65E7.csv': 'A', '\u8D44\u6599/\u5BA2\u6237.csv': 'B', '\u8D44\u6599/\u5F52\u6863/2025.csv': 'C', '\u8D44\u6599\u5E93.csv': 'D' } };
+	await p.moveTableMeta('\u65E7.csv', '\u65B0.csv'); await p.moveTableMeta('\u8D44\u6599', '\u9879\u76EE/\u8D44\u6599');
+	assert.deepEqual(p.pluginData.tables, { '\u65B0.csv': 'A', '\u9879\u76EE/\u8D44\u6599/\u5BA2\u6237.csv': 'B', '\u9879\u76EE/\u8D44\u6599/\u5F52\u6863/2025.csv': 'C', '\u8D44\u6599\u5E93.csv': 'D' });
+	await p.moveTableMeta('\u7B14\u8BB0.md', '\u522B\u5904.md'); assert.equal(saves, 2);
+});
+function openCsv(source, stored) {
+	const v = Object.create(LiteGridCsvView.prototype); v.file = { path: 't.csv', basename: 't' }; v.metaSaves = 0;
+	v.host = { getTableMeta: () => stored }; v.render = () => {}; v.scheduleMetaSave = () => { v.metaSaves++; };
+	v.setViewData(source, false); return v;
+}
+test('opening a table keeps the user\'s own header text and field types', () => {
+	const stored = { fields: [{ id: 'a', name: '\u6807\u9898', type: 'text', visible: true, width: 200, options: [] }], rowHeight: 'default', statistics: {}, filters: [], sorts: [], groups: [], fills: [] };
+	const titled = openCsv('\u6807\u9898,\u6570\u5B57,\u5355\u9009\n\u82F9\u679C,1,\u751C\n', stored); assert.equal(titled.meta.fields[0].type, 'text'); assert.equal(titled.metaSaves, 0);
+	assert.equal(openCsv('\u6587\u672C,\u6570\u5B57,\u5355\u9009\n\u82F9\u679C,1,\u751C\n').getViewData(), '\u6587\u672C,\u6570\u5B57,\u5355\u9009\n\u82F9\u679C,1,\u751C\n');
+	assert.equal(openCsv('\u6807\u9898,\u6570\u5B57,\u5355\u9009\n').meta.fields[0].type, 'attachment', 'new tables still start with an index column');
+});
+test('replacement text is inserted literally, including $ signs', () => {
+	const v = view([['\u4EF7\u683C\u8868','1']]); v.searchTerm = '\u4EF7\u683C'; v.searchCaseSensitive = false;
+	v.replacementTerm = '$$'; assert.equal(v.replaceInValue('\u4EF7\u683C\u8868', true), '$$\u8868');
+	v.replacementTerm = '$&\u5143'; assert.equal(v.replaceInValue('\u4EF7\u683C\u8868', false), '$&\u5143\u8868');
+});
+test('new fields are typed by their name, not by their position', () => {
+	const v = view([]);
+	assert.equal(v.newField('\u5B57\u6BB5 2', 1).type, 'text'); assert.equal(v.newField('\u57CE\u5E02', 1).type, 'text');
+	assert.equal(v.newField('\u6570\u5B57', 1).type, 'number'); assert.equal(v.newField('\u6807\u9898', 0).type, 'attachment');
+});
+test('Escape only closes panels of the table it happened in', () => {
+	const v = view([]); const body = {}, inside = {}; let active = v;
+	v.containerEl = { contains: node => node === inside, ownerDocument: { body } };
+	v.app = { workspace: { getActiveViewOfType: () => active } };
+	assert.equal(v.ownsKeyEvent({ target: inside }), true);
+	assert.equal(v.ownsKeyEvent({ target: {} }), false, 'another note or a modal');
+	assert.equal(v.ownsKeyEvent({ target: body }), true);
+	active = {}; assert.equal(v.ownsKeyEvent({ target: body }), false);
+});
+test('only one grouping level is kept, because only one is applied', () => {
+	const v = view([['A','x']]);
+	assert.deepEqual(v.reconcileMeta({ ...v.meta, groups: [{ id: 'g1', column: 0 }, { id: 'g2', column: 1 }] }, v.headers).groups.map(g => g.id), ['g1']);
+	v.meta.groups = [{ id: 'old', column: 0 }]; v.headerMenuItems(1).find(item => item.label === '\u5206\u7EC4').action();
+	assert.equal(v.meta.groups.length, 1); assert.equal(v.meta.groups[0].column, 1);
 });
 
 const { LiteGridHtmlView } = load(root + '/src/ui/html-view.ts');

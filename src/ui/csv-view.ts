@@ -86,13 +86,19 @@ export class LiteGridCsvView extends TextFileView {
 	async onOpen() {
 		this.registerDomEvent(this.containerEl.ownerDocument, 'mouseup', () => { this.dragging = false; });
 		this.registerDomEvent(this.containerEl.ownerDocument, 'keydown', (event) => {
-			if (event.key !== 'Escape') return;
+			if (event.key !== 'Escape' || !this.ownsKeyEvent(event)) return;
 			const fieldEditor = this.contentEl.querySelector<HTMLElement>('.wb-field-editor');
 			if (fieldEditor) fieldEditor.remove();
 			else if (this.contextMenu) this.closeContextMenu();
 			else if (this.panel) { this.panel = null; this.render(); }
 			else if (this.searchVisible) { this.searchVisible = false; this.searchTerm = ''; this.replacementTerm = ''; this.render(); }
 		});
+	}
+	// 只处理落在本表格里的按键；焦点在页面空白处时，看本表格是不是当前激活的标签页
+	private ownsKeyEvent(event: KeyboardEvent): boolean {
+		const target = event.target as Node | null;
+		if (target && this.containerEl.contains(target)) return true;
+		return (!target || target === this.containerEl.ownerDocument.body) && this.app.workspace.getActiveViewOfType(LiteGridCsvView) === this;
 	}
 
 	setViewData(data: string, clear: boolean) {
@@ -103,7 +109,6 @@ export class LiteGridCsvView extends TextFileView {
 		const hasHeaderText = header?.some((cell) => cell.length > 0) ?? false;
 		if (hasHeaderText) {
 			this.headers = [...header!];
-			if (this.headers[0] === '文本' && this.headers[1] === '数字' && this.headers[2] === '单选') this.headers[0] = '标题';
 			const width = body.reduce((max, row) => Math.max(max, row.length), this.headers.length);
 			this.headers = normalizeRows([this.headers], width)[0] ?? this.headers;
 			this.rows = normalizeRows(body, width);
@@ -118,11 +123,7 @@ export class LiteGridCsvView extends TextFileView {
 		}
 		const stored = this.file ? this.host.getTableMeta(this.file.path) : undefined;
 		this.meta = this.reconcileMeta(stored, this.headers);
-		const defaultSignature = this.headers[0] === '标题' && this.headers[1] === '数字' && this.headers[2] === '单选';
-		const restoredDefaultType = defaultSignature && this.meta.fields[0]?.type === 'text';
-		if (restoredDefaultType && this.meta.fields[0]) this.meta.fields[0].type = 'attachment';
 		this.render();
-		if (restoredDefaultType) this.scheduleMetaSave();
 	}
 
 	getViewData(): string { return serializeCsv({ ...this.document, rows: [this.headers, ...this.rows] }); }
@@ -138,7 +139,7 @@ export class LiteGridCsvView extends TextFileView {
 	}
 	private newField(name: string, index: number): FieldSchema {
 		const lowered = name.toLocaleLowerCase();
-		let type: FieldType = index === 1 || /数字|金额|数量|价格|number/.test(lowered) ? 'number' : 'text';
+		let type: FieldType = /数字|金额|数量|价格|number/.test(lowered) ? 'number' : 'text';
 		if (index === 0 && name === '标题') type = 'attachment';
 		if (/单选|状态|类型/.test(lowered)) type = 'single';
 		if (/日期|时间|date/.test(lowered)) type = 'date';
@@ -157,7 +158,7 @@ export class LiteGridCsvView extends TextFileView {
 			fields, rowHeight: stored.rowHeight ?? 'default', statistics: stored.statistics ?? {},
 			filters: (stored.filters ?? []).filter((rule) => rule.column < fields.length),
 			sorts: (stored.sorts ?? []).filter((rule) => rule.column < fields.length),
-			groups: (stored.groups ?? []).filter((rule) => rule.column < fields.length),
+			groups: (stored.groups ?? []).filter((rule) => rule.column < fields.length).slice(0, 1),
 			fills: (stored.fills ?? []).filter((rule) => rule.column < fields.length),
 		};
 	}
@@ -299,7 +300,7 @@ export class LiteGridCsvView extends TextFileView {
 	private replaceInValue(value: string, all: boolean): string {
 		if (!this.searchTerm) return value;
 		const escaped = this.searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-		return value.replace(new RegExp(escaped, `${all ? 'g' : ''}${this.searchCaseSensitive ? '' : 'i'}`), this.replacementTerm);
+		return value.replace(new RegExp(escaped, `${all ? 'g' : ''}${this.searchCaseSensitive ? '' : 'i'}`), () => this.replacementTerm);
 	}
 
 	private replaceNext() {
@@ -536,6 +537,7 @@ export class LiteGridCsvView extends TextFileView {
 	private renderGroupPanel(panel: HTMLElement) {
 		if (!this.meta.groups.length) panel.createDiv({ cls: 'wb-panel-empty', text: '暂无分组条件' }); const list = panel.createDiv('wb-rule-list');
 		this.meta.groups.forEach((rule, index) => { const row = list.createDiv('wb-rule-row'); row.createSpan({ cls: 'wb-drag-handle', text: '⠿' }); const field = row.createEl('select'); this.meta.fields.forEach((item, column) => field.createEl('option', { value: String(column), text: `${TYPE_HINT[item.type]}  ${item.name}` })); field.value = String(rule.column); field.onchange = () => { rule.column = Number(field.value); this.scheduleMetaSave(); this.render(); }; const remove = row.createEl('button', { cls: 'wb-rule-remove' }); setIcon(remove, 'circle-minus'); remove.onclick = () => { this.meta.groups.splice(index, 1); this.scheduleMetaSave(); this.render(); }; });
+		if (this.meta.groups.length) return; // 目前只支持一级分组
 		const add = panel.createEl('button', { cls: 'wb-panel-add' }); setIcon(add.createSpan(), 'circle-plus'); add.createSpan({ text: '添加分组条件' }); add.onclick = () => { this.meta.groups.push({ id: uid('group'), column: 0 }); this.scheduleMetaSave(); this.render(); };
 	}
 	private renderSortPanel(panel: HTMLElement) {
@@ -1338,7 +1340,7 @@ export class LiteGridCsvView extends TextFileView {
 		{ label: '修改字段', icon: 'pencil', action: () => { this.render(); window.setTimeout(() => { const header = this.contentEl.querySelector<HTMLElement>(`.wb-column-header[data-column="${column}"]`) ?? this.contentEl.querySelectorAll<HTMLElement>('.wb-column-header')[column]; if (header) this.openFieldEditor(header, column); }, 0); } },
 		{ label: '插入字段', icon: 'between-vertical-start', action: () => this.insertColumn(column + 1) }, { label: '创建副本', icon: 'copy', action: () => this.duplicateColumn(column) }, { divider: true },
 		{ label: '筛选', icon: 'list-filter', action: () => { this.meta.filters.push({ id: uid('filter'), column, operator: 'not-empty', value: '' }); this.panel = 'filter'; this.scheduleMetaSave(); this.render(); } },
-		{ label: '分组', icon: 'rows-3', action: () => { this.meta.groups.push({ id: uid('group'), column }); this.panel = 'group'; this.scheduleMetaSave(); this.render(); } },
+		{ label: '分组', icon: 'rows-3', action: () => { this.meta.groups = [{ id: uid('group'), column }]; this.panel = 'group'; this.scheduleMetaSave(); this.render(); } },
 		{ label: '排序', icon: 'arrow-up-down', action: () => { this.meta.sorts.push({ id: uid('sort'), column, direction: 'asc' }); this.panel = 'sort'; this.scheduleMetaSave(); this.render(); } },
 		{ label: '填色', icon: 'paint-bucket', action: () => { this.meta.fills.push({ id: uid('fill'), column, operator: 'all', value: '', color: OPTION_COLORS[0]!, wholeRow: false }); this.panel = 'fill'; this.scheduleMetaSave(); this.render(); } }, { divider: true },
 		{ label: '调整至合适列宽', icon: 'move-horizontal', action: () => this.fitColumn(column) }, { label: '冻结到此列', icon: 'snowflake', action: () => { this.meta.fields.forEach((field, index) => { field.frozen = index <= column; }); this.scheduleMetaSave(); this.render(); } }, { label: '隐藏字段', icon: 'eye-off', action: () => { const field = this.meta.fields[column]; if (field) field.visible = false; this.scheduleMetaSave(); this.render(); } }, { divider: true },

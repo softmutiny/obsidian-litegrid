@@ -25,6 +25,8 @@ export default class LiteGridPlugin extends Plugin implements TableMetaHost {
 			new Notice('轻格已加载，但 HTML 正被其他插件占用。请先关闭旧的 HTML 编辑器。');
 		}
 		registerNewCsvMenu(this);
+		// 表格设置按路径存；在文件列表里改名、移动（包括整个文件夹）时跟着搬过去
+		this.registerEvent(this.app.vault.on('rename', (file, oldPath) => { void this.moveTableMeta(oldPath, file.path); }));
 	}
 
 	getTableMeta(path: string): TableMeta | undefined {
@@ -40,6 +42,20 @@ export default class LiteGridPlugin extends Plugin implements TableMetaHost {
 		delete this.pluginData.tables[oldPath];
 		this.pluginData.tables[newPath] = meta;
 		await this.saveData(this.pluginData);
+	}
+
+	async moveTableMeta(oldPath: string, newPath: string): Promise<void> {
+		const tables = this.pluginData.tables;
+		let moved = false;
+		for (const path of Object.keys(tables)) {
+			const suffix = path === oldPath ? '' : path.startsWith(`${oldPath}/`) ? path.slice(oldPath.length) : null;
+			const meta = tables[path];
+			if (suffix === null || !meta) continue;
+			delete tables[path];
+			tables[newPath + suffix] = meta;
+			moved = true;
+		}
+		if (moved) await this.saveData(this.pluginData);
 	}
 
 }
