@@ -1,9 +1,12 @@
 # 轻格 LiteGrid
 
+**简体中文** | [English](README.en.md)
+
 **轻负担、高审美的 CSV 与 HTML 编辑器。**
-**A calm, native-feeling CSV and HTML editor for Obsidian.**
 
 轻格面向喜欢安静、清晰界面的人：保留结构化编辑需要的能力，把复杂功能收进需要时才出现的菜单里，让数据自然地待在 Obsidian 中。
+
+![在 Obsidian 中用轻格编辑 CSV 表格](screenshots/table-light.png)
 
 ## 功能
 
@@ -13,6 +16,18 @@
 - Obsidian 内部链接索引与本地图片预览
 - 预览、可视化编辑 `.html` / `.htm`，并可随时切换源码；预览时页面自带的脚本在隔离沙盒中运行
 - 本地优先：不上传资料库内容，不依赖云端服务，不包含遥测
+
+## 截图
+
+### 分组、排序与深色主题
+
+![按状态分组、按日期排序的表格（深色主题）](screenshots/table-dark.png)
+
+### HTML 预览
+
+打开 `.html` 默认进入预览，页面自带的脚本照常运行；需要修改时，一键切换「可视化编辑」或「源码」。
+
+![HTML 预览模式](screenshots/html-preview.png)
 
 ## 设计原则
 
@@ -25,7 +40,7 @@
 
 ### 社区插件
 
-轻格提交到 Obsidian 社区插件目录后，可在 **设置 → 第三方插件 → 浏览** 中搜索 `LiteGrid` 或 `轻格` 安装。
+在 **设置 → 第三方插件 → 浏览** 中搜索 `LiteGrid` 安装。
 
 ### 手动安装
 
@@ -53,37 +68,3 @@ HTML 预览会运行页面自带的脚本，但脚本被关在隔离沙盒里：
 ## 许可证
 
 [0BSD](LICENSE)
-
----
-
-## English
-
-LiteGrid is a calm, native-feeling CSV and HTML editor for people who want structured data without visual overload.
-
-### Features
-
-- Open, edit, and save `.csv` files directly in Obsidian
-- Typed fields for text, numbers, currency, selects, dates, checkboxes, links, images, and vault indexes
-- Filtering, grouping, sorting, conditional fills, and adjustable rows and columns
-- Obsidian internal-link indexes and local image previews
-- Preview and visual editing for `.html` and `.htm` files with a source mode; previews run the page's own scripts in an isolated sandbox
-- Local-first operation with no cloud dependency or telemetry
-
-### Design principles
-
-- **Lightweight:** no separate database system to learn
-- **Calm:** restrained color, spacing, and feedback
-- **Native-feeling:** built around Obsidian theme variables and interaction patterns
-- **File-first:** your data remains ordinary CSV and HTML files
-
-### Installation
-
-After LiteGrid is accepted into the Obsidian community directory, install it from **Settings → Community plugins → Browse** by searching for `LiteGrid`.
-
-For a manual installation, place `main.js`, `manifest.json`, and `styles.css` from the latest release in `.obsidian/plugins/litegrid/`, reload Obsidian, and enable **LiteGrid**.
-
-### Privacy
-
-LiteGrid works offline. It does not collect analytics or transmit filenames or vault content. Image and index features access only local files inside the current Obsidian vault.
-
-HTML previews run the page's own scripts inside an isolated sandbox: they cannot call Obsidian or read local files through network requests. Open untrusted HTML in source mode first.
