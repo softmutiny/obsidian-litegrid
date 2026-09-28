@@ -7,6 +7,7 @@ const { test } = require('node:test');
 const ts = require('typescript');
 const root = path.resolve(__dirname, '..');
 const cache = new Map();
+global.window ??= global; // Node 里没有 window，给插件代码用的计时器
 function load(file) {
 	file = path.resolve(file);
 	if (cache.has(file)) return cache.get(file).exports;
@@ -15,7 +16,7 @@ function load(file) {
 		compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2021 },
 	}).outputText;
 	const requireStub = name => name === 'obsidian'
-		? { TextFileView: class {}, Modal: class {}, Notice: class {}, TFile: class {}, normalizePath: value => value, setIcon() {} }
+		? { TextFileView: class { getState() { return { file: 'page.html' }; } async setState() {} }, Modal: class {}, Notice: class {}, TFile: class {}, normalizePath: value => value, setIcon() {} }
 		: load(path.resolve(path.dirname(file), `${name}.ts`));
 	vm.runInThisContext(`(function(require,module,exports){${code}\n})`, { filename: file })(requireStub, module, module.exports);
 	return module.exports;
@@ -134,4 +135,50 @@ test('CSV delimiter detection respects multiline and mid-field quotes', () => {
 });
 test('CSV retains BOM, CRLF, wide rows and trailing newline', () => {
 	const source='\uFEFFa,b\r\n1,2,3\r\n'; assert.equal(serializeCsv(parseCsv(source)),source);
+});
+
+const { LiteGridHtmlView } = load(root + '/src/ui/html-view.ts');
+function htmlView(source, mode = 'preview') {
+	const v = new LiteGridHtmlView({});
+	v.source = source; v.isFullDocument = /<!doctype|<html[\s>]/i.test(source); v.mode = mode;
+	v.file = { basename: 'page' }; v.renders = 0; v.frameReads = 0; v.saves = 0; v.layoutSaves = 0;
+	v.app = { vault: { getResourcePath: () => 'app://local/F:/\u5E93/$1/page.html?1' }, workspace: { requestSaveLayout: () => { v.layoutSaves++; } } };
+	v.render = () => { v.renders++; v.renderedMode = v.mode; };
+	v.readFrame = () => { v.frameReads++; };
+	v.scheduleSave = () => { v.saves++; };
+	v.setStatus = () => {};
+	return v;
+}
+test('HTML opens in preview and remembers the chosen mode per tab', async () => {
+	const v = new LiteGridHtmlView({}); assert.equal(v.mode, 'preview');
+	v.mode = 'source'; assert.deepEqual(v.getState(), { file: 'page.html', mode: 'source' });
+	await v.setState({ mode: 'visual' }, { history: false }); assert.equal(v.mode, 'visual');
+	await v.setState({ mode: 'bogus' }, { history: false }); assert.equal(v.mode, 'visual');
+});
+test('preview runs page scripts in an isolated document with in-page anchors', () => {
+	const csp = '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'">';
+	const html = htmlView(`<!DOCTYPE html><html lang="zh"><head>${csp}</head><body><a href="#a">a</a></body></html>`).buildPreviewDocument();
+	assert.match(html, /^<!DOCTYPE html><html lang="zh"><head><base data-wb-editor-base href="app:\/\/local\/F:\/%E5%BA%93\/\$1\/">/);
+	assert.ok(html.includes('content="connect-src http: https: ws: wss: data: blob:"'));
+	assert.ok(html.includes('<script data-wb-preview>'));
+	assert.ok(html.includes(csp), 'the page keeps its own CSP in preview');
+	assert.ok(htmlView('<p>\u7247\u6BB5</p>').buildPreviewDocument().endsWith('</head><body><p>\u7247\u6BB5</p></body></html>'));
+});
+test('visual editing still neutralizes page CSP and keeps $ in folder names intact', () => {
+	const html = htmlView('<html><head><meta http-equiv="Content-Security-Policy" content="x"></head></html>', 'visual').buildEditableDocument();
+	assert.ok(html.includes('data-wb-csp="Content-Security-Policy"'));
+	assert.ok(html.includes('href="app://local/F:/%E5%BA%93/$1/"'));
+	assert.ok(!html.includes('data-wb-preview'));
+});
+test('leaving visual mode reads the frame only when edits are pending', () => {
+	const clean = htmlView('<p>\u539F\u6587</p>', 'visual'); clean.switchMode('preview');
+	assert.equal(clean.frameReads, 0); assert.equal(clean.saves, 0); assert.equal(clean.mode, 'preview'); assert.equal(clean.layoutSaves, 1);
+	const dirty = htmlView('<p>\u539F\u6587</p>', 'visual'); dirty.inputTimer = window.setTimeout(() => {}, 60000);
+	dirty.switchMode('source'); assert.equal(dirty.frameReads, 1); assert.equal(dirty.saves, 1); assert.equal(dirty.inputTimer, null);
+	dirty.switchMode('source'); assert.equal(dirty.renders, 1);
+});
+test('typing into form controls inside the page does not rewrite the file', () => {
+	const v = htmlView('<input>', 'visual'); let reads = 0; v.scheduleFrameRead = () => { reads++; };
+	for (const tagName of ['INPUT', 'TEXTAREA', 'SELECT']) v.handleFrameInput({ target: { tagName } });
+	assert.equal(reads, 0); v.handleFrameInput({ target: { tagName: 'P' } }); assert.equal(reads, 1);
 });

@@ -32,6 +32,6 @@ export default defineConfig(
 	{
 		files: ['tests/*.cjs'],
 		languageOptions: { globals: globals.node },
-		rules: { '@typescript-eslint/no-require-imports': 'off' },
+		rules: { '@typescript-eslint/no-require-imports': 'off', 'obsidianmd/no-global-this': 'off' },
 	},
 );

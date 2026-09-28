@@ -11,7 +11,7 @@
 - 字段类型：文本、数字、货币、单选、多选、日期、复选框、链接、邮箱、电话、图片与索引
 - 筛选、分组、排序、条件填色、行高与列宽调整
 - Obsidian 内部链接索引与本地图片预览
-- 可视化编辑 `.html` / `.htm`，并可随时切换源码
+- 预览、可视化编辑 `.html` / `.htm`，并可随时切换源码；预览时页面自带的脚本在隔离沙盒中运行
 - 本地优先：不上传资料库内容，不依赖云端服务，不包含遥测
 
 ## 设计原则
@@ -48,6 +48,8 @@ npm run build
 
 轻格离线运行，不收集分析数据，不发送文件名或资料库内容。图片与索引功能仅访问当前 Obsidian 资料库中的本地文件。
 
+HTML 预览会运行页面自带的脚本，但脚本被关在隔离沙盒里：不能调用 Obsidian，也不能通过网络请求读取本机文件。来源不明的 HTML 建议先用「源码」查看。
+
 ## 许可证
 
 [0BSD](LICENSE)
@@ -64,7 +66,7 @@ LiteGrid is a calm, native-feeling CSV and HTML editor for people who want struc
 - Typed fields for text, numbers, currency, selects, dates, checkboxes, links, images, and vault indexes
 - Filtering, grouping, sorting, conditional fills, and adjustable rows and columns
 - Obsidian internal-link indexes and local image previews
-- Visual editing for `.html` and `.htm` files with an optional source mode
+- Preview and visual editing for `.html` and `.htm` files with a source mode; previews run the page's own scripts in an isolated sandbox
 - Local-first operation with no cloud dependency or telemetry
 
 ### Design principles
@@ -83,3 +85,5 @@ For a manual installation, place `main.js`, `manifest.json`, and `styles.css` fr
 ### Privacy
 
 LiteGrid works offline. It does not collect analytics or transmit filenames or vault content. Image and index features access only local files inside the current Obsidian vault.
+
+HTML previews run the page's own scripts inside an isolated sandbox: they cannot call Obsidian or read local files through network requests. Open untrusted HTML in source mode first.
