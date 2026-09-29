@@ -390,3 +390,9 @@ col.wb-col-addfield { width: 120px; }
 /* keep vertical dividers crisp on the lifted ghost + source row */
 .wb-row-drag-ghost-cell, .wb-row-drag-ghost-num { border-right: 1px solid var(--background-modifier-border); }
 .wb-grid tbody tr.is-dragging-row > * { opacity: .55; }
+
+/* 触屏没有悬停：原本悬停才出现的按钮常显，长按不弹系统菜单 */
+@media (hover: none) {
+	.wb-column-chevron, .wb-cell-image-picker, .wb-file-current-actions, .wb-field-actions, .wb-add-row-line .wb-column-stat { opacity: 1; }
+	.wb-grid { -webkit-touch-callout: none; }
+}

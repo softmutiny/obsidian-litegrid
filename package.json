@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-litegrid",
-	"version": "0.3.5",
+	"version": "0.4.0",
 	"description": "轻负担、高审美的 CSV 与 HTML 编辑器",
 	"main": "main.js",
 	"type": "module",

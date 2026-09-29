@@ -1,4 +1,4 @@
-import { Modal, normalizePath, Notice, setIcon, TextFileView, TFile, WorkspaceLeaf } from 'obsidian';
+import { Modal, normalizePath, Notice, Platform, setIcon, TextFileView, TFile, WorkspaceLeaf } from 'obsidian';
 import { normalizeRows, parseCsv, serializeCsv, type CsvDocument } from '../utils/csv';
 import {
 	FIELD_TYPES, OPTION_COLORS, type ColumnStatistic, type CurrencyCode, type DateFormat, type FieldSchema, type FieldType, type FillRule,
@@ -93,6 +93,29 @@ export class LiteGridCsvView extends TextFileView {
 			else if (this.panel) { this.panel = null; this.render(); }
 			else if (this.searchVisible) { this.searchVisible = false; this.searchTerm = ''; this.replacementTerm = ''; this.render(); }
 		});
+		if (Platform.isIosApp) this.bindLongPressContextMenu();
+	}
+	// iOS 长按不会触发 contextmenu，这里把长按转成右键菜单；安卓原生就会触发，不需要
+	private bindLongPressContextMenu() {
+		let timer: number | null = null; let startX = 0; let startY = 0; let swallowClickUntil = 0;
+		const cancel = () => { if (timer !== null) { window.clearTimeout(timer); timer = null; } };
+		this.registerDomEvent(this.contentEl, 'touchstart', (event: TouchEvent) => {
+			cancel(); if (event.touches.length !== 1) return;
+			const touch = event.touches[0]; const target = event.target as HTMLElement | null;
+			if (!touch || !target?.closest('.wb-grid')) return;
+			startX = touch.clientX; startY = touch.clientY;
+			timer = window.setTimeout(() => {
+				timer = null; swallowClickUntil = Date.now() + 700;
+				target.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: startX, clientY: startY }));
+			}, 500);
+		}, { passive: true });
+		this.registerDomEvent(this.contentEl, 'touchmove', (event: TouchEvent) => {
+			const touch = event.touches[0]; if (!touch) return;
+			if (Math.abs(touch.clientX - startX) > 10 || Math.abs(touch.clientY - startY) > 10) cancel();
+		}, { passive: true });
+		this.registerDomEvent(this.contentEl, 'touchend', cancel);
+		this.registerDomEvent(this.contentEl, 'touchcancel', cancel);
+		this.registerDomEvent(this.contentEl, 'click', (event) => { if (Date.now() < swallowClickUntil) { event.preventDefault(); event.stopPropagation(); swallowClickUntil = 0; } }, { capture: true });
 	}
 	// 只处理落在本表格里的按键；焦点在页面空白处时，看本表格是不是当前激活的标签页
 	private ownsKeyEvent(event: KeyboardEvent): boolean {
@@ -620,7 +643,7 @@ export class LiteGridCsvView extends TextFileView {
 		const tr = body.createEl('tr'); tr.dataset.row = String(item.index); if (this.selection?.startRow === item.index) tr.addClass('is-active-row'); const rowHead = tr.createEl('th', { cls: 'wb-row-number', text: String(item.index + 1) }); rowHead.dataset.row = String(item.index); this.applyRowHeadSelectionClasses(rowHead, item.index);
 		rowHead.onclick = () => { this.selection = { startRow: item.index, endRow: item.index, startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.renderGridOnly(); };
 		rowHead.oncontextmenu = (event) => { event.preventDefault(); this.selection = { startRow: item.index, endRow: item.index, startColumn: 0, endColumn: Math.max(0, this.headers.length - 1) }; this.openContextMenu(event.clientX, event.clientY, this.rowMenuItems(item.index)); };
-		if (item.index < this.rows.length) {
+		if (item.index < this.rows.length && !Platform.isMobile) {
 			rowHead.draggable = true; rowHead.setAttribute('title', '拖拽调整行顺序');
 			rowHead.ondragstart = (event) => {
 				this.dragRowIndex = item.index; tr.addClass('is-dragging-row');
@@ -1346,7 +1369,7 @@ export class LiteGridCsvView extends TextFileView {
 		{ label: '调整至合适列宽', icon: 'move-horizontal', action: () => this.fitColumn(column) }, { label: '冻结到此列', icon: 'snowflake', action: () => { this.meta.fields.forEach((field, index) => { field.frozen = index <= column; }); this.scheduleMetaSave(); this.render(); } }, { label: '隐藏字段', icon: 'eye-off', action: () => { const field = this.meta.fields[column]; if (field) field.visible = false; this.scheduleMetaSave(); this.render(); } }, { divider: true },
 		{ label: '删除字段', icon: 'trash-2', danger: true, action: () => this.deleteColumn(column) },
 	]; }
-	private rowMenuItems(row: number): MenuItem[] { return [ { label: '创建副本', icon: 'files', action: () => this.duplicateRow(row) }, { label: '在上方插入', icon: 'arrow-up', quantityAction: (count) => this.insertRows(row, count) }, { label: '在下方插入', icon: 'arrow-down', quantityAction: (count) => this.insertRows(row + 1, count) }, { label: '删除', icon: 'trash-2', danger: true, action: () => this.deleteRows() } ]; }
+	private rowMenuItems(row: number): MenuItem[] { return [ { label: '创建副本', icon: 'files', action: () => this.duplicateRow(row) }, { label: '在上方插入', icon: 'arrow-up', quantityAction: (count) => this.insertRows(row, count) }, { label: '在下方插入', icon: 'arrow-down', quantityAction: (count) => this.insertRows(row + 1, count) }, ...(Platform.isMobile && row < this.rows.length ? [{ label: '上移一行', icon: 'chevron-up', action: () => this.moveRow(row, row - 1) }, { label: '下移一行', icon: 'chevron-down', action: () => this.moveRow(row, row + 1) }] : []), { label: '删除', icon: 'trash-2', danger: true, action: () => this.deleteRows() } ]; }
 	private cellMenuItems(row: number, column: number): MenuItem[] { return [ { label: '只看已填写', icon: 'filter', action: () => { this.meta.filters.push({ id: uid('filter'), column, operator: 'not-empty', value: '' }); this.scheduleMetaSave(); this.render(); } }, { label: '只看未填写', icon: 'filter', action: () => { this.meta.filters.push({ id: uid('filter'), column, operator: 'empty', value: '' }); this.scheduleMetaSave(); this.render(); } }, { divider: true }, ...this.rowMenuItems(row) ]; }
 
 	private moveRow(from: number, to: number) {
